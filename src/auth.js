@@ -81,7 +81,7 @@ function createAuthManager(config) {
           obj[token] = info;
         }
       }
-      fs.writeFileSync(TOKEN_FILE, JSON.stringify(obj, null, 2), 'utf8');
+      fs.writeFileSync(TOKEN_FILE, JSON.stringify(obj, null, 2), { encoding: 'utf8', mode: 0o600 });
     } catch (err) {
       logger.warn(`Could not save tokens: ${err.message}`);
     }

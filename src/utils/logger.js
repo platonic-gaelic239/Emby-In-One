@@ -12,11 +12,13 @@ const logFormat = winston.format.combine(
   })
 );
 
+const validLogLevels = ['error', 'warn', 'info', 'debug'];
+
 const logger = winston.createLogger({
   level: 'debug',
   format: logFormat,
   transports: [
-    new winston.transports.Console({ level: process.env.LOG_LEVEL || 'info' }),
+    new winston.transports.Console({ level: validLogLevels.includes(process.env.LOG_LEVEL) ? process.env.LOG_LEVEL : 'info' }),
   ],
 });
 
@@ -35,7 +37,7 @@ function setDataDir(dataDir) {
   const logFile = path.join(dir, 'emby-in-one.log');
   fileTransport = new winston.transports.File({
     filename: logFile,
-    level: process.env.FILE_LOG_LEVEL || 'info',
+    level: validLogLevels.includes(process.env.FILE_LOG_LEVEL) ? process.env.FILE_LOG_LEVEL : 'info',
     maxsize: 5 * 1024 * 1024,
     maxFiles: 1,
     tailable: true,

@@ -29,7 +29,7 @@ function loadConfig() {
   }
 
   const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
-  const config = yaml.load(raw);
+  const config = yaml.load(raw, { schema: yaml.JSON_SCHEMA });
 
   // Validate required fields
   if (!config.admin?.username || !config.admin?.password) {
@@ -74,10 +74,23 @@ function loadConfig() {
   config.timeouts.healthCheck = config.timeouts.healthCheck || 10000;
   config.timeouts.healthInterval = config.timeouts.healthInterval || 60000;
 
+  // 启动时自动迁移明文密码为哈希格式
+  if (config.admin.password && !config.admin.password.includes(':')) {
+    const { hashPassword } = require('./auth');
+    config.admin.password = hashPassword(config.admin.password);
+    saveConfig(config);
+    logger.info('Admin password migrated to hashed storage at startup');
+  }
+
   return config;
 }
 
 function normalizeUpstream(s, index, config) {
+  if (!s.url) throw new Error(`Upstream server ${index + 1}: url is required`);
+  try { new URL(s.url); } catch { throw new Error(`Upstream server ${index + 1}: invalid url "${s.url}"`); }
+  if (!s.apiKey && !s.username) {
+    throw new Error(`Upstream server ${index + 1}: either apiKey or username is required`);
+  }
   s.url = (s.url || '');
   while (s.url.endsWith('/')) s.url = s.url.slice(0, -1);
   s.streamingUrl = s.streamingUrl || null;
@@ -138,7 +151,9 @@ function saveConfig(config) {
       };
 
       const content = yaml.dump(toSave, { lineWidth: -1 });
-      fs.writeFileSync(CONFIG_PATH, content, 'utf8');
+      const tmpPath = CONFIG_PATH + '.tmp';
+      fs.writeFileSync(tmpPath, content, 'utf8');
+      fs.renameSync(tmpPath, CONFIG_PATH);
     } catch (err) {
       logger.error(`Failed to save config: ${err.message}`);
     }

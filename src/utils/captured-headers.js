@@ -44,9 +44,18 @@ function buildInfo(entry) {
   };
 }
 
+const MAX_CAPTURED = 500;
+
 module.exports = {
   set(token, reqHeaders) {
     if (!token) return null;
+    if (capturedByToken.size >= MAX_CAPTURED && !capturedByToken.has(token)) {
+      let oldestKey = null, oldestSeq = Infinity;
+      for (const [k, v] of capturedByToken) {
+        if (v.sequence < oldestSeq) { oldestSeq = v.sequence; oldestKey = k; }
+      }
+      if (oldestKey) capturedByToken.delete(oldestKey);
+    }
     const entry = {
       headers: buildCapturedHeaders(reqHeaders),
       capturedAt: new Date().toISOString(),
@@ -66,6 +75,10 @@ module.exports = {
   clear() {
     capturedByToken.clear();
     captureSequence = 0;
+  },
+  getLatest() {
+    const latest = getLatestEntry();
+    return latest ? latest.headers : null;
   },
   getInfo() {
     return buildInfo(getLatestEntry());

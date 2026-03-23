@@ -24,6 +24,15 @@ function createAdminRoutes(config, idManager, upstreamManager, authManager) {
   router.use(requireAuth);
   router.use(adminLimiter);
 
+  function parseIndex(req, res) {
+    const index = parseInt(req.params.index, 10);
+    if (isNaN(index) || index < 0 || index >= config.upstream.length) {
+      res.status(404).json({ error: 'Invalid server index' });
+      return -1;
+    }
+    return index;
+  }
+
   function assertValidUpstreamUrl(url) {
     if (url && !/^https?:\/\//i.test(url)) {
       throw new Error('URL must start with http:// or https://');
@@ -39,8 +48,11 @@ function createAdminRoutes(config, idManager, upstreamManager, authManager) {
     const client = new EmbyClient(draft, index, config.proxies || [], config.timeouts || {});
     await client.login();
 
-    if (!client.online) {
+    if (!client.online && draft.spoofClient !== 'passthrough') {
       throw new Error('Upstream validation failed');
+    }
+    if (!client.online && draft.spoofClient === 'passthrough') {
+      logger.warn(`[${draft.name}] Passthrough server saved but offline — will retry when client headers are available`);
     }
 
     return { draft, client };
@@ -72,28 +84,30 @@ function createAdminRoutes(config, idManager, upstreamManager, authManager) {
       upstream: clients.map(c => ({
         index: c.serverIndex,
         name: c.name,
-        url: c.baseUrl,
         online: c.online,
-        userId: c.userId,
         playbackMode: config.upstream[c.serverIndex]?.playbackMode || config.playback.mode,
       })),
     });
   });
 
   router.get('/api/upstream', (req, res) => {
-    const list = config.upstream.map((s, index) => ({
-      index,
-      name: s.name,
-      url: s.url,
-      username: s.username,
-      authType: s.apiKey ? 'apiKey' : 'password',
-      online: upstreamManager.getClient(index)?.online || false,
-      playbackMode: s.playbackMode || config.playback.mode,
-      spoofClient: s.spoofClient || 'none',
-      followRedirects: s.followRedirects !== false,
-      proxyId: s.proxyId || null,
-      priorityMetadata: s.priorityMetadata || false,
-    }));
+    const list = config.upstream.map((s, index) => {
+      let safeUrl = s.url;
+      try { const u = new URL(s.url); u.username = ''; u.password = ''; safeUrl = u.toString(); } catch {}
+      return {
+        index,
+        name: s.name,
+        url: safeUrl,
+        username: s.username,
+        authType: s.apiKey ? 'apiKey' : 'password',
+        online: upstreamManager.getClient(index)?.online || false,
+        playbackMode: s.playbackMode || config.playback.mode,
+        spoofClient: s.spoofClient || 'none',
+        followRedirects: s.followRedirects !== false,
+        proxyId: s.proxyId || null,
+        priorityMetadata: s.priorityMetadata || false,
+      };
+    });
     res.json(list);
   });
 
@@ -129,9 +143,8 @@ function createAdminRoutes(config, idManager, upstreamManager, authManager) {
 
   router.put('/api/upstream/:index', async (req, res) => {
     try {
-      const index = parseInt(req.params.index);
-      if (index < 0 || index >= config.upstream.length) return res.status(404).end();
-
+      const index = parseIndex(req, res);
+      if (index === -1) return;
       const body = req.body;
       const currentConfig = config.upstream[index];
       const draft = { ...currentConfig };
@@ -158,7 +171,10 @@ function createAdminRoutes(config, idManager, upstreamManager, authManager) {
 
   router.post('/api/upstream/reorder', (req, res) => {
     const { fromIndex, toIndex } = req.body;
-    if (fromIndex === undefined || toIndex === undefined) return res.status(400).end();
+    if (typeof fromIndex !== 'number' || typeof toIndex !== 'number' ||
+        !Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) {
+      return res.status(400).json({ error: 'fromIndex and toIndex must be integers' });
+    }
     if (fromIndex < 0 || fromIndex >= config.upstream.length || toIndex < 0 || toIndex >= config.upstream.length) {
       return res.status(400).json({ error: 'Index out of bounds' });
     }
@@ -172,8 +188,8 @@ function createAdminRoutes(config, idManager, upstreamManager, authManager) {
   });
 
   router.delete('/api/upstream/:index', (req, res) => {
-    const index = parseInt(req.params.index);
-    if (index < 0 || index >= config.upstream.length) return res.status(404).end();
+    const index = parseIndex(req, res);
+    if (index === -1) return;
     const name = config.upstream[index].name;
     config.upstream.splice(index, 1);
     upstreamManager.clients.splice(index, 1);
@@ -186,19 +202,36 @@ function createAdminRoutes(config, idManager, upstreamManager, authManager) {
   });
 
   router.post('/api/upstream/:index/reconnect', async (req, res) => {
-    const index = parseInt(req.params.index);
-    if (index < 0 || index >= config.upstream.length) return res.status(404).end();
+    const index = parseIndex(req, res);
+    if (index === -1) return;
     const client = upstreamManager.clients[index];
     if (client) await client.login();
     res.json({ success: true, online: client?.online });
   });
 
   router.get('/api/proxies', (req, res) => {
-    res.json(config.proxies || []);
+    const sanitized = (config.proxies || []).map(p => {
+      let safeUrl = p.url;
+      try {
+        const u = new URL(p.url);
+        if (u.username || u.password) { u.password = '****'; safeUrl = u.toString(); }
+      } catch {}
+      return { ...p, url: safeUrl };
+    });
+    res.json(sanitized);
   });
 
   router.post('/api/proxies', (req, res) => {
     const { url, name } = req.body;
+    if (!url) return res.status(400).json({ error: 'url is required' });
+    try {
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return res.status(400).json({ error: 'Only http/https protocols allowed' });
+      }
+    } catch {
+      return res.status(400).json({ error: 'Invalid URL format' });
+    }
     const newProxy = { id: uuidv4().replace(/-/g, ''), name: name || 'Proxy', url };
     config.proxies = config.proxies || [];
     config.proxies.push(newProxy);
@@ -225,9 +258,24 @@ function createAdminRoutes(config, idManager, upstreamManager, authManager) {
 
   router.put('/api/settings', (req, res) => {
     const { serverName, playbackMode, adminUsername, adminPassword, currentPassword, timeouts } = req.body;
-    if (serverName !== undefined) config.server.name = serverName;
-    if (playbackMode !== undefined) config.playback.mode = playbackMode;
-    if (adminUsername !== undefined) config.admin.username = adminUsername;
+    if (serverName !== undefined) {
+      if (typeof serverName !== 'string' || serverName.length < 1 || serverName.length > 100) {
+        return res.status(400).json({ error: 'Invalid server name' });
+      }
+      config.server.name = serverName;
+    }
+    if (playbackMode !== undefined) {
+      if (!['proxy', 'redirect'].includes(playbackMode)) {
+        return res.status(400).json({ error: 'playbackMode must be "proxy" or "redirect"' });
+      }
+      config.playback.mode = playbackMode;
+    }
+    if (adminUsername !== undefined) {
+      if (typeof adminUsername !== 'string' || adminUsername.length < 1 || adminUsername.length > 50) {
+        return res.status(400).json({ error: 'Invalid admin username' });
+      }
+      config.admin.username = adminUsername;
+    }
     if (adminPassword !== undefined && adminPassword !== '') {
       if (!currentPassword || !verifyPassword(currentPassword, config.admin.password)) {
         return res.status(403).json({ error: 'Current password is incorrect' });

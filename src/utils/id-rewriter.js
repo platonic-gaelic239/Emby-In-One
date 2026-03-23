@@ -105,9 +105,12 @@ function rewriteRequestIds(obj, idManager) {
   if (obj == null || typeof obj !== 'object') return { rewritten: obj, serverIndex: null };
 
   let detectedServerIndex = null;
+  const seen = new Set();
 
   function rewrite(o) {
     if (o == null || typeof o !== 'object') return o;
+    if (seen.has(o)) return o;
+    seen.add(o);
 
     if (Array.isArray(o)) {
       for (let i = 0; i < o.length; i++) {

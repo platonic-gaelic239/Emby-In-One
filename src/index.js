@@ -32,7 +32,9 @@ async function main() {
   // Graceful shutdown
   function shutdown(signal) {
     logger.info(`${signal} received, shutting down...`);
+    upstreamManager.stopHealthChecks();
     server.close(() => {
+      idManager.close();
       logger.info('Server closed');
       process.exit(0);
     });

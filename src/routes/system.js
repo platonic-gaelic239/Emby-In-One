@@ -6,7 +6,7 @@ function createSystemRoutes(config) {
   // GET /System/Info/Public — no auth required
   router.get('/System/Info/Public', (req, res) => {
     res.json({
-      LocalAddress: `http://localhost:${config.server.port}`,
+      LocalAddress: `${req.protocol}://${req.get('host')}`,
       ServerName: config.server.name,
       Version: '4.7.14.0',
       ProductName: 'Emby Server',
@@ -26,7 +26,7 @@ function createSystemRoutes(config) {
     if (!req.proxyUser) return res.status(401).json({ message: 'Unauthorized' });
 
     res.json({
-      LocalAddress: `http://localhost:${config.server.port}`,
+      LocalAddress: `${req.protocol}://${req.get('host')}`,
       WanAddress: '',
       ServerName: config.server.name,
       Version: '4.7.14.0',

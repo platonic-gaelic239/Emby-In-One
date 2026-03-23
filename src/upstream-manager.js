@@ -279,12 +279,14 @@ function createUpstreamManager(config, idManager) {
     };
   }
 
+  let healthIntervalId = null;
+
   /**
    * Run periodic health checks on all servers.
    */
   function startHealthChecks(intervalMs) {
     intervalMs = intervalMs || (config.timeouts && config.timeouts.healthInterval) || 60000;
-    setInterval(async () => {
+    healthIntervalId = setInterval(async () => {
       await Promise.allSettled(clients.map(async (client) => {
         const wasOnline = client.online;
         await client.healthCheck();
@@ -295,6 +297,13 @@ function createUpstreamManager(config, idManager) {
         }
       }));
     }, intervalMs);
+  }
+
+  function stopHealthChecks() {
+    if (healthIntervalId) {
+      clearInterval(healthIntervalId);
+      healthIntervalId = null;
+    }
   }
 
   return {
@@ -309,6 +318,7 @@ function createUpstreamManager(config, idManager) {
     mergeSeasonsResults,
     mergeEpisodesResults,
     startHealthChecks,
+    stopHealthChecks,
   };
 }
 

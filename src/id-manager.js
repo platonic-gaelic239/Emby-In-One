@@ -291,6 +291,11 @@ function createIdManager(dataDir) {
     getStats,
     removeByServerIndex,
     shiftServerIndices,
+    close() {
+      if (db) {
+        try { db.close(); } catch (e) { logger.warn(`DB close error: ${e.message}`); }
+      }
+    },
   };
 }
 

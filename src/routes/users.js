@@ -45,10 +45,11 @@ function createUserRoutes(config, authManager, idManager, upstreamManager) {
     const client = req.headers['x-emby-client'] || '';
     logger.info(`Captured client headers for token ${result.AccessToken.substring(0, 8)}...: ${client ? client + ' / ' : ''}${ua}`);
 
+    const justCaptured = capturedHeaders.get(result.AccessToken);
     for (const c of upstreamManager.clients) {
       if (!c.online && c.config.spoofClient === 'passthrough') {
         logger.info(`[${c.name}] Re-trying login with captured client headers...`);
-        c.login().catch((err) => { logger.debug(`[${c.name}] Passthrough login retry failed: ${err.message}`); });
+        c.login(justCaptured).catch((err) => { logger.debug(`[${c.name}] Passthrough login retry failed: ${err.message}`); });
       }
     }
 

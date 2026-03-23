@@ -86,10 +86,19 @@ function createApp(config, idManager, upstreamManager) {
 
   // --- Routes (order matters: specific before generic) ---
 
-  // Admin panel: static files + API
+  // Admin panel: static files + API (with security headers)
+  app.use('/admin', (req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    next();
+  });
   app.use('/admin', express.static(path.resolve(__dirname, '..', 'public')));
   app.get('/admin', (req, res) => res.redirect('/admin/admin.html'));
   app.use('/admin', createAdminRoutes(config, idManager, upstreamManager, authManager));
+
+  // Favicon: return 204 silently (browsers auto-request, no need to log 401)
+  app.get('/favicon.ico', (req, res) => res.status(204).end());
 
   // System info (some endpoints don't need auth)
   app.use('/', createSystemRoutes(config));
@@ -97,7 +106,7 @@ function createApp(config, idManager, upstreamManager) {
   // User auth and info
   app.use('/', createUserRoutes(config, authManager, idManager, upstreamManager));
 
-  // Images (before items to avoid conflicts, allows unauthenticated image requests)
+  // Images (before items to avoid conflicts, unauthenticated per Emby convention, virtual ID check provides access control)
   app.use('/', createImageRoutes(config, idManager, upstreamManager));
 
   // Streaming (before items for /Videos/:id/stream)

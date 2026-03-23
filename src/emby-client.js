@@ -94,7 +94,7 @@ class EmbyClient {
           }
           logger.info(`[${this.name}] Using proxy: ${url.hostname}:${url.port}`);
         } catch (e) {
-          logger.error(`[${this.name}] Invalid proxy URL: ${proxyInfo.url}`);
+          logger.error(`[${this.name}] Invalid proxy URL format for proxy "${proxyInfo.name || proxyInfo.id}"`);
         }
       }
     }
@@ -138,7 +138,7 @@ class EmbyClient {
     const liveHeaders = requestContext?.headers || null;
     const proxyToken = requestContext?.proxyToken || null;
 
-    if (liveHeaders && liveHeaders['x-emby-client']) {
+    if (liveHeaders && (liveHeaders['x-emby-client'] || liveHeaders['user-agent'])) {
       captured = {};
       for (const k of PASSTHROUGH_HEADERS) {
         if (liveHeaders[k]) captured[k] = liveHeaders[k];
@@ -151,6 +151,14 @@ class EmbyClient {
       if (saved) {
         captured = { ...saved };
         source = 'captured-token';
+      }
+    }
+
+    if (!captured) {
+      const latest = capturedHeaders.getLatest();
+      if (latest) {
+        captured = { ...latest };
+        source = 'captured-latest';
       }
     }
 
@@ -203,7 +211,7 @@ class EmbyClient {
    * Login using username/password via AuthenticateByName.
    * Skipped if apiKey is already set.
    */
-  async login() {
+  async login(overrideHeaders = null) {
     if (this.config.apiKey) {
       this.accessToken = this.config.apiKey;
       logger.info(`[${this.name}] Authenticating with API key`);
@@ -229,9 +237,21 @@ class EmbyClient {
     let headerSource;
 
     if (isPassthrough) {
-      const pt = this._getPassthroughHeaders();
-      loginHeaders = pt.headers;
-      headerSource = pt.source;
+      if (overrideHeaders && Object.keys(overrideHeaders).length > 0) {
+        loginHeaders = { ...SPOOF_PROFILES.infuse };
+        if (overrideHeaders['user-agent']) loginHeaders['User-Agent'] = overrideHeaders['user-agent'];
+        if (overrideHeaders['x-emby-client']) loginHeaders['X-Emby-Client'] = overrideHeaders['x-emby-client'];
+        if (overrideHeaders['x-emby-client-version']) loginHeaders['X-Emby-Client-Version'] = overrideHeaders['x-emby-client-version'];
+        if (overrideHeaders['x-emby-device-name']) loginHeaders['X-Emby-Device-Name'] = overrideHeaders['x-emby-device-name'];
+        if (overrideHeaders['x-emby-device-id']) loginHeaders['X-Emby-Device-Id'] = overrideHeaders['x-emby-device-id'];
+        if (overrideHeaders['accept']) loginHeaders['Accept'] = overrideHeaders['accept'];
+        if (overrideHeaders['accept-language']) loginHeaders['Accept-Language'] = overrideHeaders['accept-language'];
+        headerSource = 'captured-override';
+      } else {
+        const pt = this._getPassthroughHeaders();
+        loginHeaders = pt.headers;
+        headerSource = pt.source;
+      }
     } else {
       loginHeaders = this._getSpoofHeaders();
       headerSource = this.config.spoofClient || 'default';
@@ -251,7 +271,11 @@ class EmbyClient {
       const authHeader = `Emby UserId="", Client="${clientName}", Device="${deviceName}", DeviceId="${deviceId}", Version="${clientVersion}"`;
       const reqHeaders = { ...loginHeaders, 'X-Emby-Authorization': authHeader };
 
-      logger.debug(`[${this.name}] Full login request headers: ${JSON.stringify(reqHeaders)}`);
+      const safeHeaders = { ...reqHeaders };
+      if (safeHeaders['X-Emby-Authorization']) {
+        safeHeaders['X-Emby-Authorization'] = safeHeaders['X-Emby-Authorization'].substring(0, 50) + '...';
+      }
+      logger.debug(`[${this.name}] Full login request headers: ${JSON.stringify(safeHeaders)}`);
 
       const resp = await this.http.post('/Users/AuthenticateByName', {
         Username: this.config.username,

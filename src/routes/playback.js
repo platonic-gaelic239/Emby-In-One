@@ -12,8 +12,6 @@ function createPlaybackRoutes(config, authManager, idManager, upstreamManager) {
 
   function registerPlaySession(virtualPlaySessionId, serverIndex, originalPlaySessionId) {
     playSessions.set(virtualPlaySessionId, { serverIndex, originalPlaySessionId, createdAt: Date.now() });
-    // Evict expired entries on each registration (amortized cleanup)
-    cleanupExpiredSessions();
   }
 
   function cleanupExpiredSessions() {

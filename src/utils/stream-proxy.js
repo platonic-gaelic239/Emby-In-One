@@ -4,6 +4,17 @@ const { URL } = require('url');
 const logger = require('./logger');
 const requestStore = require('./request-store');
 
+function sanitizeUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    u.searchParams.delete('api_key');
+    u.searchParams.delete('ApiKey');
+    return u.toString();
+  } catch {
+    return urlStr.replace(/[?&]api_key=[^&]*/gi, '');
+  }
+}
+
 /**
  * Rewrite HLS manifest (.m3u8) content so that segment/playlist URLs
  * point back to the proxy via relative paths instead of absolute origins.
@@ -41,7 +52,7 @@ function rewriteM3u8(content, upstreamBase, proxyToken) {
  */
 function proxyStream(upstreamUrl, token, req, res, extraHeaders = {}, followCount = 0) {
   if (followCount > 5) {
-    logger.error(`Too many redirects for ${upstreamUrl}`);
+    logger.error(`Too many redirects for ${sanitizeUrl(upstreamUrl)}`);
     if (!res.headersSent) res.status(502).json({ message: 'Too many redirects' });
     return Promise.resolve();
   }
@@ -56,7 +67,7 @@ function proxyStream(upstreamUrl, token, req, res, extraHeaders = {}, followCoun
     try {
       parsed = new URL(upstreamUrl);
     } catch (e) {
-      logger.error(`Invalid stream URL: ${upstreamUrl}`);
+      logger.error(`Invalid stream URL: ${sanitizeUrl(upstreamUrl)}`);
       if (!res.headersSent) res.status(502).json({ message: 'Invalid upstream URL' });
       return done();
     }
@@ -84,7 +95,9 @@ function proxyStream(upstreamUrl, token, req, res, extraHeaders = {}, followCoun
       }
     }
 
-    logger.debug(`Stream proxy: ${parsed.hostname}${parsed.pathname.substring(0, 60)} headers=${JSON.stringify(options.headers)}`);
+    const safeLogHeaders = { ...options.headers };
+    if (safeLogHeaders['X-Emby-Token']) safeLogHeaders['X-Emby-Token'] = safeLogHeaders['X-Emby-Token'].substring(0, 8) + '...';
+    logger.debug(`Stream proxy: ${parsed.hostname}${parsed.pathname.substring(0, 60)} headers=${JSON.stringify(safeLogHeaders)}`);
 
     const upstreamReq = lib.request(options, (upstreamRes) => {
       const statusCode = upstreamRes.statusCode;
@@ -132,10 +145,21 @@ function proxyStream(upstreamUrl, token, req, res, extraHeaders = {}, followCoun
       const isM3u8 = contentType.includes('mpegurl') || parsed.pathname.endsWith('.m3u8');
 
       if (isM3u8) {
+        const MAX_M3U8_SIZE = 2 * 1024 * 1024;
         res.removeHeader('content-length');
         let body = '';
+        let bodyLen = 0;
         upstreamRes.setEncoding('utf8');
-        upstreamRes.on('data', chunk => { body += chunk; });
+        upstreamRes.on('data', chunk => {
+          bodyLen += chunk.length;
+          if (bodyLen > MAX_M3U8_SIZE) {
+            upstreamRes.destroy();
+            if (!res.headersSent) res.status(502).json({ message: 'M3U8 response too large' });
+            done();
+            return;
+          }
+          body += chunk;
+        });
         upstreamRes.on('end', () => {
           const rewritten = rewriteM3u8(body, upstreamUrl, req._proxyToken);
           res.set('content-type', 'application/x-mpegURL');

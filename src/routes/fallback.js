@@ -88,6 +88,12 @@ function createFallbackRoutes(config, authManager, idManager, upstreamManager) {
           return res.json(data);
         }
 
+        // Guard: if upstream returned HTML instead of JSON (WAF/CDN error pages), don't forward raw HTML
+        if (typeof data === 'string' && data.trimStart().startsWith('<')) {
+          logger.warn(`Fallback: upstream [${targetClient.name}] returned HTML for GET ${req.path}, discarding`);
+          return res.status(502).json({ message: 'Upstream returned non-JSON response' });
+        }
+
         res.send(data);
       } else {
         // POST, DELETE, etc.
@@ -102,6 +108,10 @@ function createFallbackRoutes(config, authManager, idManager, upstreamManager) {
         }
 
         if (data) {
+          if (typeof data === 'string' && data.trimStart().startsWith('<')) {
+            logger.warn(`Fallback: upstream [${targetClient.name}] returned HTML for ${req.method} ${req.path}, discarding`);
+            return res.status(502).json({ message: 'Upstream returned non-JSON response' });
+          }
           res.send(data);
         } else {
           res.status(204).end();
@@ -109,14 +119,9 @@ function createFallbackRoutes(config, authManager, idManager, upstreamManager) {
       }
     } catch (err) {
       if (err.response) {
-        // Forward upstream error status
         const status = err.response.status;
-        const data = err.response.data;
         logger.debug(`Fallback upstream error: ${status} for ${req.method} ${req.path}`);
-        if (data && typeof data === 'object') {
-          return res.status(status).json(data);
-        }
-        return res.status(status).type('text/plain').send(typeof data === 'string' ? data : String(data ?? ''));
+        return res.status(status).json({ message: `Upstream returned ${status}` });
       }
 
       logger.error(`Fallback error: ${req.method} ${req.path} - ${err.message}`);
