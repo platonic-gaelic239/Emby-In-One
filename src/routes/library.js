@@ -272,24 +272,58 @@ function createLibraryRoutes(config, authManager, idManager, upstreamManager) {
         }
       }
 
-      const allHints = [];
-      let totalCount = 0;
-
+      // Collect per-server hint arrays for interleaving
+      const serverHintArrays = [];
       for (const r of results) {
         if (r.status === 'fulfilled') {
           const { serverIndex, data } = r.value;
           const hints = data.SearchHints || data.Items || [];
-          totalCount += data.TotalRecordCount || hints.length;
-          for (const hint of hints) {
-            rewriteResponseIds(hint, serverIndex, idManager, config.server.id, authManager.getProxyUserId());
-            allHints.push(hint);
+          serverHintArrays.push({ serverIndex, hints });
+        }
+      }
+
+      // Interleave results from all servers and deduplicate
+      const allHints = [];
+      const seenKeys = new Map();
+
+      function getHintKey(hint) {
+        if (hint.ProviderIds && hint.ProviderIds.Tmdb) return `tmdb:${hint.ProviderIds.Tmdb}`;
+        const type = hint.Type || '';
+        if (type === 'Movie' || type === 'Series' || type === 'Audio' || type === 'MusicAlbum') {
+          return `name:${(hint.Name || '').toLowerCase()}:${hint.ProductionYear || ''}`;
+        }
+        if (type === 'Episode' && hint.Series && hint.ParentIndexNumber != null && hint.IndexNumber != null) {
+          return `ep:${hint.Series.toLowerCase()}:S${hint.ParentIndexNumber}E${hint.IndexNumber}`;
+        }
+        return null;
+      }
+
+      const maxLen = Math.max(0, ...serverHintArrays.map(a => a.hints.length));
+      for (let i = 0; i < maxLen; i++) {
+        for (const arr of serverHintArrays) {
+          if (i >= arr.hints.length) continue;
+          const hint = arr.hints[i];
+          const key = getHintKey(hint);
+
+          if (key) {
+            const existingVirtualId = seenKeys.get(key);
+            if (existingVirtualId) {
+              // Duplicate: associate with existing virtual ID and skip
+              idManager.associateAdditionalInstance(existingVirtualId, String(hint.Id || hint.ItemId), arr.serverIndex);
+              continue;
+            }
+            const virtualId = idManager.getOrCreateVirtualId(String(hint.Id || hint.ItemId), arr.serverIndex);
+            seenKeys.set(key, virtualId);
           }
+
+          rewriteResponseIds(hint, arr.serverIndex, idManager, config.server.id, authManager.getProxyUserId());
+          allHints.push(hint);
         }
       }
 
       res.json({
         SearchHints: allHints,
-        TotalRecordCount: totalCount,
+        TotalRecordCount: allHints.length,
       });
     } catch (err) {
       logger.error(`Error in GET Search/Hints: ${err.message}`);

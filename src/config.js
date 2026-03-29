@@ -167,6 +167,7 @@ function saveConfig(config) {
       logger.error(`Failed to save config: ${err.message}`);
     }
   });
+  return writeQueue;
 }
 
 module.exports = { loadConfig, saveConfig, normalizeUpstream, CONFIG_PATH };

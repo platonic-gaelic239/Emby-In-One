@@ -17,7 +17,7 @@ async function main() {
     const { hashPassword } = require('./auth');
     const { saveConfig } = require('./config');
     config.admin.password = hashPassword(newPass);
-    saveConfig(config);
+    await saveConfig(config);
     console.log('Admin password has been reset successfully.');
     process.exit(0);
   }
