@@ -11,7 +11,7 @@
 [演示站点](https://emby.cothx.eu.cc/)
 Emby连接地址：https://emby.cothx.eu.cc/
 账号：admin
-密码：J78xUTg1d3dqLV9o
+密码：5T5xF4oMxcnrcCPA
 
 ## 预览
 
