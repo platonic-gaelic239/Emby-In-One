@@ -7,7 +7,7 @@ set -e
 
 PROJECT_DIR="/opt/emby-in-one"
 # 远程安装时使用的 tarball 地址（上传到 GitHub 后填写）
-REPO_URL="https://github.com/<owner>/emby-in-one/archive/refs/heads/main.tar.gz"
+REPO_URL="https://github.com/ArizeSky/Emby-In-One/archive/refs/heads/main.tar.gz"
 
 # ── 颜色 ──
 RED='\033[0;31m'
@@ -20,6 +20,19 @@ NC='\033[0m'
 info()  { echo -e "${GREEN}[信息]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[警告]${NC} $*"; }
 error() { echo -e "${RED}[错误]${NC} $*"; exit 1; }
+
+is_hashed_password() {
+  [[ "$1" =~ ^[0-9a-fA-F]{32}:[0-9a-fA-F]{128}$ ]]
+}
+
+format_admin_password() {
+  local value="$1"
+  if is_hashed_password "$value"; then
+    echo "已加密存储（当前密码无法直接显示，请通过 SSH 菜单重置）"
+  else
+    echo "$value"
+  fi
+}
 
 # ── 回滚机制 ──
 _ROLLBACK_NEEDED=false
@@ -140,13 +153,101 @@ _ROLLBACK_NEEDED=true
 # ── 5. 复制/下载项目文件 ──
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -d "${SCRIPT_DIR}/src" && -f "${SCRIPT_DIR}/package.json" ]]; then
-  info "从 ${SCRIPT_DIR} 复制项目文件..."
-  for item in src public package.json package-lock.json Dockerfile docker-compose.yml; do
-    if [[ -e "${SCRIPT_DIR}/${item}" ]]; then
-      cp -r "${SCRIPT_DIR}/${item}" "${PROJECT_DIR}/"
-    fi
+copy_item() {
+  local src="$1"
+  local dst="$2"
+  if [[ -e "$src" ]]; then
+    cp -r "$src" "$dst"
+  fi
+}
+
+write_runtime_dockerfile() {
+  cat > "${PROJECT_DIR}/Dockerfile" <<'EOF'
+FROM golang:1.26-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY go.mod ./
+COPY third_party ./third_party
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=1 go build -o /out/emby-in-one ./cmd/emby-in-one
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+RUN mkdir -p /app/config /app/data /app/public
+COPY public ./public
+COPY --from=builder /out/emby-in-one ./emby-in-one
+EXPOSE 8096
+CMD ["./emby-in-one"]
+EOF
+}
+
+write_runtime_compose() {
+  cat > "${PROJECT_DIR}/docker-compose.yml" <<'EOF'
+services:
+  emby-in-one:
+    build: .
+    container_name: emby-in-one
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+    restart: unless-stopped
+EOF
+}
+
+copy_distribution_layout() {
+  local base="$1"
+  local required=(cmd internal third_party public go.mod)
+  for item in "${required[@]}"; do
+    [[ -e "${base}/${item}" ]] || return 1
   done
+
+  info "从 ${base} 复制 Go 独立发行目录文件..."
+  for item in cmd internal third_party public go.mod README.md README_EN.md Update.md emby-in-one-cli.sh .dockerignore LICENSE; do
+    copy_item "${base}/${item}" "${PROJECT_DIR}/"
+  done
+  write_runtime_dockerfile
+  write_runtime_compose
+  return 0
+}
+
+copy_root_layout() {
+  local base="$1"
+  [[ -d "${base}/go-backend" && -d "${base}/public" ]] || return 1
+  [[ -e "${base}/go-backend/go.mod" ]] || return 1
+
+  info "从 ${base} 复制根仓库中的 Go 部署文件..."
+  copy_item "${base}/go-backend/cmd" "${PROJECT_DIR}/"
+  copy_item "${base}/go-backend/internal" "${PROJECT_DIR}/"
+  copy_item "${base}/go-backend/third_party" "${PROJECT_DIR}/"
+  copy_item "${base}/go-backend/go.mod" "${PROJECT_DIR}/"
+  for item in public README.md README_EN.md Update.md emby-in-one-cli.sh .dockerignore LICENSE; do
+    copy_item "${base}/${item}" "${PROJECT_DIR}/"
+  done
+  write_runtime_dockerfile
+  write_runtime_compose
+  return 0
+}
+
+copy_project_files_from() {
+  local base="$1"
+  if copy_distribution_layout "$base"; then
+    return 0
+  fi
+  if [[ -d "${base}/Emby-In-One-Go" ]] && copy_distribution_layout "${base}/Emby-In-One-Go"; then
+    return 0
+  fi
+  if copy_root_layout "$base"; then
+    return 0
+  fi
+  return 1
+}
+
+if copy_project_files_from "${SCRIPT_DIR}"; then
+  :
 else
   if [[ "$REPO_URL" == *"<owner>"* ]]; then
     error "未找到本地项目文件，且 REPO_URL 尚未配置，无法远程安装"
@@ -154,18 +255,15 @@ else
   info "未找到本地项目文件，从远程下载..."
   TMP_DIR=$(mktemp -d)
   curl -fsSL "${REPO_URL}" | tar -xz -C "${TMP_DIR}" --strip-components=1
-  for item in src public package.json package-lock.json Dockerfile docker-compose.yml; do
-    if [[ -e "${TMP_DIR}/${item}" ]]; then
-      cp -r "${TMP_DIR}/${item}" "${PROJECT_DIR}/"
-    fi
-  done
+  if ! copy_project_files_from "${TMP_DIR}"; then
+    rm -rf "${TMP_DIR}"
+    error "下载内容中未找到可部署的 Go 项目文件"
+  fi
   rm -rf "${TMP_DIR}"
 fi
-
 # ── 6. 创建数据目录 ──
 mkdir -p "${PROJECT_DIR}/config"
 mkdir -p "${PROJECT_DIR}/data"
-mkdir -p "${PROJECT_DIR}/log"
 
 # ── 7. 生成配置文件 ──
 if [[ ! -f "${PROJECT_DIR}/config/config.yaml" ]]; then
@@ -197,13 +295,11 @@ upstream: []
 EOF
 else
   info "配置文件已存在，跳过生成"
-  ADMIN_USER=$(grep 'username:' "${PROJECT_DIR}/config/config.yaml" | head -1 | awk '{print $2}' | tr -d '"')
-  ADMIN_PASS=$(grep 'password:' "${PROJECT_DIR}/config/config.yaml" | head -1 | awk '{print $2}' | tr -d '"')
-  # 密码已被哈希，无法还原显示
-  if echo "$ADMIN_PASS" | grep -q ':'; then
-    ADMIN_PASS="(已加密，使用上次设置的密码登录。如需重置: docker exec -it emby-in-one node src/index.js --reset-password 新密码)"
-  fi
+  ADMIN_USER=$(grep '  username:' "${PROJECT_DIR}/config/config.yaml" | head -1 | sed "s/^  username:[[:space:]]*//" | sed "s/^'//;s/'$//;s/^\"//;s/\"$//")
+  ADMIN_PASS=$(grep '  password:' "${PROJECT_DIR}/config/config.yaml" | head -1 | sed "s/^  password:[[:space:]]*//" | sed "s/^'//;s/'$//;s/^\"//;s/\"$//")
 fi
+
+ADMIN_PASS_DISPLAY=$(format_admin_password "$ADMIN_PASS")
 
 # ── 8. 设置权限 ──
 chmod -R 755 "${PROJECT_DIR}"
@@ -225,13 +321,16 @@ echo -e "${BOLD}║         ${GREEN}Emby In One 安装完成！${NC}${BOLD}     
 echo -e "${BOLD}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${BOLD}║${NC}                                                      ${BOLD}║${NC}"
 echo -e "${BOLD}║${NC}  管理员用户名: ${CYAN}${ADMIN_USER}${NC}"
-echo -e "${BOLD}║${NC}  管理员密码:   ${CYAN}${ADMIN_PASS}${NC}"
+echo -e "${BOLD}║${NC}  管理员密码:   ${CYAN}${ADMIN_PASS_DISPLAY}${NC}"
 echo -e "${BOLD}║${NC}                                                      ${BOLD}║${NC}"
 echo -e "${BOLD}║${NC}  访问地址:     ${CYAN}http://${SERVER_IP}:8096${NC}"
 echo -e "${BOLD}║${NC}  管理面板:     ${CYAN}http://${SERVER_IP}:8096/admin${NC}"
 echo -e "${BOLD}║${NC}                                                      ${BOLD}║${NC}"
 echo -e "${BOLD}║${NC}  ${YELLOW}请妥善保管以上凭据！${NC}                                ${BOLD}║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
+if is_hashed_password "$ADMIN_PASS"; then
+  echo -e "${YELLOW}提示：当前配置中的管理员密码已加密存储，无法直接查看。如需重置，请使用 SSH 菜单 emby-in-one。${NC}"
+fi
 echo ""
 
 # ── 11. 安装 CLI 管理脚本 ──
@@ -246,3 +345,4 @@ elif [[ -e "${PROJECT_DIR}/emby-in-one-cli.sh" ]]; then
 fi
 
 info "安装完成！"
+

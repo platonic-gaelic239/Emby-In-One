@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 
 # ╔══════════════════════════════════════╗
-# ║      Emby In One 管理菜单            ║
+# ║    Emby In One 管理菜单 V1.3.6       ║
 # ╚══════════════════════════════════════╝
 
 PROJECT_DIR="/opt/emby-in-one"
+VERSION="1.3.6"
 
 # ── 颜色 ──
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
@@ -27,14 +30,34 @@ compose_cmd() {
   fi
 }
 
-# ── 读取配置 ──
+# ── 读取配置（正确处理 YAML 引号）──
 get_config_value() {
   local key="$1"
-  grep "^  ${key}:" "${PROJECT_DIR}/config/config.yaml" 2>/dev/null | head -1 | sed "s/.*${key}: *//" | tr -d "'" | tr -d '"'
+  local raw
+  raw=$(grep "^  ${key}:" "${PROJECT_DIR}/config/config.yaml" 2>/dev/null | head -1 | sed "s/^  ${key}:[[:space:]]*//" )
+  # 去除 YAML 单引号或双引号包裹
+  raw="${raw#\'}" ; raw="${raw%\'}"
+  raw="${raw#\"}" ; raw="${raw%\"}"
+  # 去除行尾空白
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  echo "$raw"
 }
 
 get_port() {
   get_config_value "port"
+}
+
+is_hashed_password() {
+  [[ "$1" =~ ^[0-9a-fA-F]{32}:[0-9a-fA-F]{128}$ ]]
+}
+
+reset_password_via_cli() {
+  local new_password="$1"
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'emby-in-one'; then
+    docker exec -i emby-in-one /app/emby-in-one --reset-password "$new_password"
+  else
+    cd "${PROJECT_DIR}" && compose_cmd run --rm --no-deps emby-in-one /app/emby-in-one --reset-password "$new_password"
+  fi
 }
 
 # ── 按任意键返回 ──
@@ -44,24 +67,15 @@ pause_return() {
   echo ""
 }
 
-# ── 格式化框线辅助 ──
-print_box_top() {
-  echo -e "${CYAN}┌──────────────────────────────────────┐${NC}"
+# ── 分隔线辅助 ──
+print_line() {
+  echo -e "${CYAN}──────────────────────────────────────────${NC}"
 }
-print_box_mid() {
-  echo -e "${CYAN}├──────────────┬───────────────────────┤${NC}"
-}
-print_box_sep() {
-  echo -e "${CYAN}├──────────────┼───────────────────────┤${NC}"
-}
-print_box_bottom() {
-  echo -e "${CYAN}└──────────────┴───────────────────────┘${NC}"
-}
-print_box_title() {
-  printf "${CYAN}│${NC}${BOLD}%-38s${NC}${CYAN}│${NC}\n" "  $1"
-}
-print_box_row() {
-  printf "${CYAN}│${NC} %-12s ${CYAN}│${NC} %-21s ${CYAN}│${NC}\n" "$1" "$2"
+
+print_kv() {
+  local label="$1"
+  local value="$2"
+  printf "  ${DIM}%-14s${NC} %s\n" "$label" "$value"
 }
 
 # ── 将秒数转为可读时长 ──
@@ -103,42 +117,46 @@ do_stop() {
   echo -e "${GREEN}✔ 服务已关闭${NC}"
 }
 
+do_update() {
+  echo -e "${CYAN}▶ 正在重新构建并更新服务...${NC}"
+  echo ""
+  cd "${PROJECT_DIR}" && compose_cmd build --no-cache
+  compose_cmd up -d
+  echo ""
+  echo -e "${GREEN}✔ 服务已更新${NC}"
+}
+
 do_status() {
   echo -e "${CYAN}▶ 正在获取服务状态...${NC}"
   echo ""
 
-  # 获取容器名
   local container
   container=$(cd "${PROJECT_DIR}" && compose_cmd ps -q 2>/dev/null | head -1)
 
   if [[ -z "$container" ]]; then
-    print_box_top
-    print_box_title "Emby In One 服务状态"
-    print_box_mid
-    print_box_row "容器状态" "● 未运行"
-    print_box_bottom
+    print_line
+    echo -e "  ${BOLD}Emby In One 服务状态${NC}"
+    print_line
+    echo -e "  容器状态     ${RED}● 未运行${NC}"
+    print_line
     return
   fi
 
-  # 用 docker inspect 获取信息
-  local status started_at image container_id ports_raw
+  local status started_at image container_id
   status=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)
   started_at=$(docker inspect --format '{{.State.StartedAt}}' "$container" 2>/dev/null)
   image=$(docker inspect --format '{{.Config.Image}}' "$container" 2>/dev/null)
   container_id=$(docker inspect --format '{{.Id}}' "$container" 2>/dev/null)
   container_id="${container_id:0:12}"
 
-  # 解析端口
   local port_display
   port_display=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{$p}} -> {{(index $conf 0).HostPort}}{{"\n"}}{{end}}' "$container" 2>/dev/null | head -1)
   if [[ -z "$port_display" ]]; then
     port_display="无端口映射"
   else
-    # 简化 "8096/tcp -> 8096" 为 "8096 -> 8096"
     port_display=$(echo "$port_display" | sed 's|/tcp||g; s|/udp||g')
   fi
 
-  # 计算运行时长
   local uptime_display="N/A"
   if [[ "$status" == "running" && -n "$started_at" ]]; then
     local start_epoch now_epoch diff
@@ -150,7 +168,6 @@ do_status() {
     fi
   fi
 
-  # 状态文字
   local status_text
   if [[ "$status" == "running" ]]; then
     status_text="${GREEN}● 运行中${NC}"
@@ -160,21 +177,15 @@ do_status() {
     status_text="${YELLOW}● ${status}${NC}"
   fi
 
-  print_box_top
-  print_box_title "Emby In One 服务状态"
-  print_box_mid
-  # 状态行需要特殊处理颜色
-  printf "${CYAN}│${NC} %-12s ${CYAN}│${NC} " "容器状态"
-  echo -e "${status_text}$(printf '%*s' $((21 - 10)) '')${CYAN}│${NC}"
-  print_box_sep
-  print_box_row "运行时长" "$uptime_display"
-  print_box_sep
-  print_box_row "端口映射" "$port_display"
-  print_box_sep
-  print_box_row "镜像" "$image"
-  print_box_sep
-  print_box_row "容器 ID" "$container_id"
-  print_box_bottom
+  print_line
+  echo -e "  ${BOLD}Emby In One 服务状态${NC}"
+  print_line
+  echo -e "  容器状态     ${status_text}"
+  print_kv "运行时长" "$uptime_display"
+  print_kv "端口映射" "$port_display"
+  print_kv "镜像" "$image"
+  print_kv "容器 ID" "$container_id"
+  print_line
 }
 
 do_show_ip() {
@@ -188,46 +199,54 @@ do_show_ip() {
   ipv6=$(curl -6 -s --max-time 5 ip.sb 2>/dev/null)
 
   echo ""
-  echo -e "${CYAN}┌─ 服务器 IP 地址 ────────────────────────────┐${NC}"
-  echo -e "${CYAN}│${NC}"
+  print_line
+  echo -e "  ${BOLD}服务器 IP 地址${NC}"
+  print_line
   if [[ -n "$ipv4" ]]; then
-    echo -e "${CYAN}│${NC}  IPv4:  ${GREEN}${ipv4}${NC}"
+    print_kv "IPv4" "${GREEN}${ipv4}${NC}"
   else
-    echo -e "${CYAN}│${NC}  IPv4:  ${RED}无法获取${NC}"
+    print_kv "IPv4" "${RED}无法获取${NC}"
   fi
   if [[ -n "$ipv6" ]]; then
-    echo -e "${CYAN}│${NC}  IPv6:  ${GREEN}${ipv6}${NC}"
+    print_kv "IPv6" "${GREEN}${ipv6}${NC}"
   else
-    echo -e "${CYAN}│${NC}  IPv6:  ${YELLOW}无法获取或不支持${NC}"
+    print_kv "IPv6" "${YELLOW}无法获取或不支持${NC}"
   fi
-  echo -e "${CYAN}│${NC}"
-  echo -e "${CYAN}├─ 访问地址 ──────────────────────────────────┤${NC}"
-  echo -e "${CYAN}│${NC}"
+  echo ""
+  echo -e "  ${BOLD}访问地址${NC}"
+  print_line
   if [[ -n "$ipv4" ]]; then
-    echo -e "${CYAN}│${NC}  访问地址:  ${GREEN}http://${ipv4}:${port}${NC}"
-    echo -e "${CYAN}│${NC}  管理面板:  ${GREEN}http://${ipv4}:${port}/admin${NC}"
+    print_kv "客户端地址" "${GREEN}http://${ipv4}:${port}${NC}"
+    print_kv "管理面板" "${GREEN}http://${ipv4}:${port}/admin${NC}"
   fi
   if [[ -n "$ipv6" ]]; then
-    echo -e "${CYAN}│${NC}  IPv6 访问: ${GREEN}http://[${ipv6}]:${port}${NC}"
+    print_kv "IPv6 访问" "${GREEN}http://[${ipv6}]:${port}${NC}"
   fi
-  echo -e "${CYAN}│${NC}"
-  echo -e "${CYAN}└──────────────────────────────────────────────┘${NC}"
+  print_line
   echo ""
 }
 
 do_show_admin() {
-  local username password
+  local username password password_display
   username=$(get_config_value "username")
   password=$(get_config_value "password")
 
+  if is_hashed_password "$password"; then
+    password_display="${DIM}已加密存储（不可直接查看）${NC}"
+  else
+    password_display="$password"
+  fi
+
   echo ""
-  print_box_top
-  print_box_title "管理员凭据"
-  print_box_mid
-  print_box_row "用户名" "$username"
-  print_box_sep
-  print_box_row "密码" "$password"
-  print_box_bottom
+  print_line
+  echo -e "  ${BOLD}管理员凭据${NC}"
+  print_line
+  print_kv "用户名" "$username"
+  echo -e "  ${DIM}密码${NC}           $password_display"
+  print_line
+  if is_hashed_password "$password"; then
+    echo -e "  ${YELLOW}提示：密码已加密存储，如需重置请使用菜单选项 [8]${NC}"
+  fi
   echo ""
 }
 
@@ -241,7 +260,7 @@ do_change_username() {
     echo -e "${YELLOW}用户名不能为空，操作取消${NC}"
     return
   fi
-  awk -v val="$new_username" '/^  username:/{print "  username: " val; next}1' "${PROJECT_DIR}/config/config.yaml" > "${PROJECT_DIR}/config/config.yaml.tmp" && mv "${PROJECT_DIR}/config/config.yaml.tmp" "${PROJECT_DIR}/config/config.yaml"
+  awk -v val="$new_username" '/^  username:/{print "  username: \x27" val "\x27"; next}1' "${PROJECT_DIR}/config/config.yaml" > "${PROJECT_DIR}/config/config.yaml.tmp" && mv "${PROJECT_DIR}/config/config.yaml.tmp" "${PROJECT_DIR}/config/config.yaml"
   echo ""
   echo -e "${GREEN}✔ 用户名已修改为: ${new_username}${NC}"
   echo -e "${YELLOW}▶ 正在重启服务使配置生效...${NC}"
@@ -255,11 +274,15 @@ do_change_password() {
     echo -e "${YELLOW}密码不能为空，操作取消${NC}"
     return
   fi
-  awk -v val="$new_password" '/^  password:/{print "  password: " val; next}1' "${PROJECT_DIR}/config/config.yaml" > "${PROJECT_DIR}/config/config.yaml.tmp" && mv "${PROJECT_DIR}/config/config.yaml.tmp" "${PROJECT_DIR}/config/config.yaml"
+  echo -e "${YELLOW}▶ 正在调用内置 reset-password CLI...${NC}"
+  if ! reset_password_via_cli "$new_password"; then
+    echo -e "${RED}✘ 密码重置失败${NC}"
+    return
+  fi
   echo ""
   echo -e "${GREEN}✔ 密码已修改${NC}"
   echo -e "${YELLOW}▶ 正在重启服务使配置生效...${NC}"
-  cd "${PROJECT_DIR}" && compose_cmd restart
+  cd "${PROJECT_DIR}" && compose_cmd restart >/dev/null 2>&1 || true
   echo -e "${GREEN}✔ 完成${NC}"
 }
 
@@ -275,7 +298,6 @@ do_uninstall() {
   echo -e "  此操作将停止并删除容器和镜像。"
   echo ""
 
-  # 第一次确认
   read -rp "  确认卸载？(输入 yes 继续): " confirm
   if [[ "$confirm" != "yes" ]]; then
     echo -e "${YELLOW}操作已取消${NC}"
@@ -284,7 +306,6 @@ do_uninstall() {
 
   echo ""
 
-  # 询问是否删除数据
   read -rp "  是否删除配置和数据？(y/N): " del_data
 
   echo ""
@@ -299,7 +320,6 @@ do_uninstall() {
     find "${PROJECT_DIR}" -maxdepth 1 ! -name config ! -name data ! -name . -exec rm -rf {} +
   fi
 
-  # 删除 CLI 自身
   echo -e "${YELLOW}▶ 正在删除 CLI 工具...${NC}"
   rm -f /usr/local/bin/emby-in-one
   hash -d emby-in-one 2>/dev/null
@@ -318,21 +338,25 @@ do_uninstall() {
 # ── 主菜单 ──
 show_menu() {
   echo ""
-  echo -e "${BOLD}╔══════════════════════════════════════╗${NC}"
-  echo -e "${BOLD}║      Emby In One 管理菜单            ║${NC}"
-  echo -e "${BOLD}╠══════════════════════════════════════╣${NC}"
-  echo -e "${BOLD}║${NC}  1. 启动服务                         ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC}  2. 重启服务                         ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC}  3. 关闭服务                         ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC}  4. 查看服务状态                     ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC}  5. 查看服务器 IP 地址               ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC}  6. 查看管理员账号密码               ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC}  7. 修改管理员账号                   ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC}  8. 修改管理员密码                   ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC}  9. 查看日志                         ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC} 10. 卸载 Emby In One                 ${BOLD}║${NC}"
-  echo -e "${BOLD}║${NC}  0. 退出                             ${BOLD}║${NC}"
-  echo -e "${BOLD}╚══════════════════════════════════════╝${NC}"
+  echo -e "${BOLD}${BLUE}  ┌──────────────────────────────────────┐${NC}"
+  echo -e "${BOLD}${BLUE}  │     Emby In One 管理菜单  ${DIM}v${VERSION}${NC}${BOLD}${BLUE}     │${NC}"
+  echo -e "${BOLD}${BLUE}  └──────────────────────────────────────┘${NC}"
+  echo ""
+  echo -e "  ${BOLD}服务管理${NC}"
+  echo -e "    ${GREEN}1${NC}) 启动服务          ${GREEN}2${NC}) 重启服务"
+  echo -e "    ${GREEN}3${NC}) 关闭服务          ${GREEN}4${NC}) 更新服务"
+  echo ""
+  echo -e "  ${BOLD}信息查看${NC}"
+  echo -e "    ${CYAN}5${NC}) 查看服务状态      ${CYAN}6${NC}) 查看服务器 IP"
+  echo ""
+  echo -e "  ${BOLD}账号管理${NC}"
+  echo -e "    ${MAGENTA}7${NC}) 查看管理员凭据    ${MAGENTA}8${NC}) 修改管理员密码"
+  echo -e "    ${MAGENTA}9${NC}) 修改管理员账号"
+  echo ""
+  echo -e "  ${BOLD}系统维护${NC}"
+  echo -e "   ${YELLOW}10${NC}) 查看日志         ${RED}11${NC}) 卸载 Emby In One"
+  echo ""
+  echo -e "    ${DIM}0${NC}) 退出"
   echo ""
 }
 
@@ -347,20 +371,22 @@ fi
 while true; do
   clear
   show_menu
-  read -rp "请选择操作 [0-10]: " choice
+  read -rp "请选择操作 [0-11]: " choice
   echo ""
   case $choice in
     1) do_start; pause_return ;;
     2) do_restart; pause_return ;;
     3) do_stop; pause_return ;;
-    4) do_status; pause_return ;;
-    5) do_show_ip; pause_return ;;
-    6) do_show_admin; pause_return ;;
-    7) do_change_username; pause_return ;;
+    4) do_update; pause_return ;;
+    5) do_status; pause_return ;;
+    6) do_show_ip; pause_return ;;
+    7) do_show_admin; pause_return ;;
     8) do_change_password; pause_return ;;
-    9) do_logs; pause_return ;;
-    10) do_uninstall ;;
+    9) do_change_username; pause_return ;;
+    10) do_logs; pause_return ;;
+    11) do_uninstall ;;
     0) clear; echo -e "${GREEN}再见！${NC}"; exit 0 ;;
     *) echo -e "${RED}无效选择，请重试${NC}"; pause_return ;;
   esac
 done
+

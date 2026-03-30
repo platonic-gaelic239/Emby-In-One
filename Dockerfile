@@ -1,25 +1,17 @@
-# Build stage: compile native dependencies
-FROM node:20-slim AS builder
-RUN set -ex; \
-    # Try official repos first (works for US/EU/HK servers with good connectivity) \
-    if apt-get update 2>/dev/null; then \
-      echo "Using default Debian mirrors"; \
-    else \
-      echo "Default mirrors failed, trying Aliyun mirrors..."; \
-      sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null \
-        || sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true; \
-      apt-get update; \
-    fi; \
-    apt-get install -y --no-install-recommends build-essential python3 g++ make \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY package*.json ./
-RUN npm install --omit=dev
+FROM golang:1.26-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY go.mod ./
+COPY third_party ./third_party
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=1 go build -o /out/emby-in-one ./cmd/emby-in-one
 
-# Runtime stage: clean image without build tools
-FROM node:20-slim
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=builder /app/node_modules ./node_modules
-COPY . .
+RUN mkdir -p /app/config /app/data /app/public
+COPY public ./public
+COPY --from=builder /out/emby-in-one ./emby-in-one
 EXPOSE 8096
-CMD ["node", "src/index.js"]
+CMD ["./emby-in-one"]
