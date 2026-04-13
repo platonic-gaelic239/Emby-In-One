@@ -191,20 +191,23 @@ if [[ ! -d "${PROJECT_DIR}/public" ]]; then
   mkdir -p "${PROJECT_DIR}/public"
 fi
 info "正在获取配套资源文件..."
-ADMIN_HTML_URL="https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}/admin.html"
-if ! curl -fsSL --max-time 30 -o "${PROJECT_DIR}/public/admin.html" "${ADMIN_HTML_URL}" 2>/dev/null; then
-  # 如果 release 没有提供，则尝试回退到拉取 main 分支的 admin.html
-  warn "未在 Release ${RELEASE_TAG} 中找到 admin.html，尝试从 main 分支拉取..."
-  ADMIN_HTML_MAIN_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/public/admin.html"
-  if ! curl -fsSL --max-time 30 -o "${PROJECT_DIR}/public/admin.html" "${ADMIN_HTML_MAIN_URL}" 2>/dev/null; then
-    cat > "${PROJECT_DIR}/public/admin.html" << 'HTMLEOF'
+for ASSET_FILE in admin.html admin.js; do
+  ASSET_URL="https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}/${ASSET_FILE}"
+  if ! curl -fsSL --max-time 30 -o "${PROJECT_DIR}/public/${ASSET_FILE}" "${ASSET_URL}" 2>/dev/null; then
+    warn "未在 Release ${RELEASE_TAG} 中找到 ${ASSET_FILE}，尝试从 main 分支拉取..."
+    ASSET_MAIN_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/public/${ASSET_FILE}"
+    if ! curl -fsSL --max-time 30 -o "${PROJECT_DIR}/public/${ASSET_FILE}" "${ASSET_MAIN_URL}" 2>/dev/null; then
+      if [[ "$ASSET_FILE" == "admin.html" ]]; then
+        cat > "${PROJECT_DIR}/public/admin.html" << 'HTMLEOF'
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Emby-in-One</title></head>
 <body><h1>Emby-in-One</h1><p>管理面板下载失败。请稍候手动将 public/admin.html 下载到所需目录。</p></body></html>
 HTMLEOF
-    warn "管理面板拉取失败，界面暂时不可用"
+      fi
+      warn "${ASSET_FILE} 拉取失败，界面可能不完整"
+    fi
   fi
-fi
+done
 
 # ── 安装 SSH 管理脚本 ──
 CLI_URL="https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}/emby-in-one-cli.sh"
