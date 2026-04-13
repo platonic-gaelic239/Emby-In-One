@@ -85,6 +85,7 @@ func (p *IdentityPersistence) SaveLatestCaptured(headers http.Header, capturedAt
 	snapshot, err := p.loadLocked()
 	if err != nil {
 		p.warnf("load captured headers before saving latest failed: %v", err)
+		return err
 	}
 	snapshot.Version = 1
 	snapshot.LatestCaptured = &persistedCapturedHeaders{
@@ -107,6 +108,7 @@ func (p *IdentityPersistence) SaveLastSuccess(serverKey string, headers http.Hea
 	snapshot, err := p.loadLocked()
 	if err != nil {
 		p.warnf("load captured headers before saving last-success failed: %v", err)
+		return err
 	}
 	snapshot.Version = 1
 	if snapshot.LastSuccessByServer == nil {

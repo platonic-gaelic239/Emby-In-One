@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const maxBatchIDCount = 2000
+
 func hasBatchIDQuery(values url.Values) bool {
 	for key, rawValues := range values {
 		if !isBatchIDQueryKey(key) {
@@ -53,6 +55,9 @@ func translateBatchIDQueryForServer(values url.Values, serverIndex int, idStore 
 		translatedValues := make([]string, 0, len(rawValues))
 		for _, raw := range rawValues {
 			parts := strings.Split(raw, ",")
+			if len(parts) > maxBatchIDCount {
+				return nil, false
+			}
 			translatedParts := make([]string, 0, len(parts))
 			for _, part := range parts {
 				part = strings.TrimSpace(part)

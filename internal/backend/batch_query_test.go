@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -150,4 +152,36 @@ func TestPersonsQueryTranslatesCommaSeparatedVirtualIDs(t *testing.T) {
 			t.Fatalf("persons UserId query = %q, want user-a", got)
 		}
 	})
+}
+
+func TestTranslateBatchIDQuery_RejectsOversized(t *testing.T) {
+	store, _ := NewIDStore("", nil)
+	defer store.Close()
+
+	values := url.Values{}
+	ids := make([]string, maxBatchIDCount+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("id-%d", i)
+	}
+	values.Set("Ids", strings.Join(ids, ","))
+	_, ok := translateBatchIDQueryForServer(values, 0, store)
+	if ok {
+		t.Error("expected oversized batch to be rejected")
+	}
+}
+
+func TestTranslateBatchIDQuery_AcceptsWithinLimit(t *testing.T) {
+	store, _ := NewIDStore("", nil)
+	defer store.Close()
+
+	values := url.Values{}
+	ids := make([]string, 10)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("id-%d", i)
+	}
+	values.Set("Ids", strings.Join(ids, ","))
+	_, ok := translateBatchIDQueryForServer(values, 0, store)
+	if !ok {
+		t.Error("expected batch within limit to be accepted")
+	}
 }

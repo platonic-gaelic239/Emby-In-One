@@ -44,7 +44,8 @@ func (a *App) handleLibrarySelectableRemoteLibraries(w http.ResponseWriter, r *h
 }
 
 func (a *App) handleLibraryNamedArray(w http.ResponseWriter, r *http.Request, upstreamPath string) {
-	onlineClients := a.Upstream.OnlineClients()
+	reqCtx := requestContextFrom(r.Context())
+	onlineClients := a.allowedClients(reqCtx)
 	cfg := a.ConfigStore.Snapshot()
 	multiSource := len(onlineClients) > 1
 	type slot struct {
@@ -81,7 +82,8 @@ func (a *App) handleLibraryNamedArray(w http.ResponseWriter, r *http.Request, up
 }
 
 func (a *App) handleLibraryMediaFolders(w http.ResponseWriter, r *http.Request) {
-	clients := a.Upstream.OnlineClients()
+	reqCtx := requestContextFrom(r.Context())
+	clients := a.allowedClients(reqCtx)
 	cfg := a.ConfigStore.Snapshot()
 	type slot struct {
 		items []map[string]any
@@ -112,7 +114,8 @@ func (a *App) handleLibraryMediaFolders(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *App) handleLibraryTaxonomy(w http.ResponseWriter, r *http.Request, endpoint string) {
-	clients := a.Upstream.OnlineClients()
+	reqCtx := requestContextFrom(r.Context())
+	clients := a.allowedClients(reqCtx)
 	cfg := a.ConfigStore.Snapshot()
 	type slot struct {
 		items []map[string]any
@@ -341,7 +344,8 @@ func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {
 		Items       []map[string]any
 	}
 
-	clients := a.Upstream.OnlineClients()
+	reqCtx := requestContextFrom(r.Context())
+	clients := a.allowedClients(reqCtx)
 	type slot struct {
 		result serverHints
 		ok     bool

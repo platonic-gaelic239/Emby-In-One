@@ -1,5 +1,7 @@
 package backend
 
+// Tokens never expire — removed by explicit logout, admin password reset, or manual revocation.
+
 import (
 	"encoding/json"
 	"os"
@@ -9,13 +11,12 @@ import (
 	"time"
 )
 
-// Tokens never expire — they are only removed by explicit logout,
-// admin password reset, or manual revocation.
-
 type tokenInfo struct {
-	UserID    string `json:"userId"`
-	Username  string `json:"username"`
-	CreatedAt int64  `json:"createdAt"`
+	UserID         string `json:"userId"`
+	Username       string `json:"username"`
+	Role           string `json:"role"`
+	AllowedServers []int  `json:"allowedServers,omitempty"`
+	CreatedAt      int64  `json:"createdAt"`
 }
 
 type AuthManager struct {
@@ -97,6 +98,9 @@ func (m *AuthManager) load() error {
 	for token, rawToken := range payload {
 		var info tokenInfo
 		if err := json.Unmarshal(rawToken, &info); err == nil {
+			if info.Role == "" && info.UserID == m.proxyUserID {
+				info.Role = "admin"
+			}
 			m.tokens[token] = info
 		}
 	}
@@ -136,7 +140,7 @@ func (m *AuthManager) Authenticate(username, password string) (map[string]any, b
 	}
 	token := randomHex(16)
 	m.mu.Lock()
-	m.tokens[token] = tokenInfo{UserID: m.proxyUserID, Username: username, CreatedAt: time.Now().UnixMilli()}
+	m.tokens[token] = tokenInfo{UserID: m.proxyUserID, Username: username, Role: "admin", CreatedAt: time.Now().UnixMilli()}
 	m.mu.Unlock()
 	if err := m.save(); err != nil {
 		return nil, false, err
@@ -200,8 +204,8 @@ func (m *AuthManager) RevokeToken(token string) bool {
 	return ok
 }
 
-// RevokeAllTokens invalidates every active token — used when admin
-// password is changed so all existing sessions must re-authenticate.
+// RevokeAllTokens removes all proxy tokens and their associated captured identity data.
+// Used when admin password is changed or reset via CLI.
 func (m *AuthManager) RevokeAllTokens() {
 	m.mu.Lock()
 	old := m.tokens
@@ -211,9 +215,104 @@ func (m *AuthManager) RevokeAllTokens() {
 		m.identity.DeleteCaptured(token)
 	}
 	_ = m.save()
-	if m.logger != nil {
-		m.logger.Infof("All %d token(s) revoked (password changed)", len(old))
+}
+
+// AuthenticateUser generates a token for an already-verified user from UserStore.
+func (m *AuthManager) AuthenticateUser(user *User) (map[string]any, string, error) {
+	token := randomHex(16)
+	m.mu.Lock()
+	m.tokens[token] = tokenInfo{
+		UserID:         user.ID,
+		Username:       user.Username,
+		Role:           "user",
+		AllowedServers: append([]int(nil), user.AllowedServers...),
+		CreatedAt:      time.Now().UnixMilli(),
 	}
+	m.mu.Unlock()
+	if err := m.save(); err != nil {
+		return nil, "", err
+	}
+	cfg := m.configStore.Snapshot()
+	response := map[string]any{
+		"User":        m.BuildUserObjectForUser(user),
+		"AccessToken": token,
+		"ServerId":    cfg.Server.ID,
+		"SessionInfo": map[string]any{
+			"UserId":                user.ID,
+			"UserName":              user.Username,
+			"ServerId":              cfg.Server.ID,
+			"Id":                    randomHex(16),
+			"DeviceId":              "proxy",
+			"DeviceName":            "Proxy Session",
+			"Client":                "Emby Aggregator",
+			"ApplicationVersion":    "1.0.0",
+			"SupportsRemoteControl": false,
+			"PlayableMediaTypes":    []string{"Audio", "Video"},
+			"SupportedCommands":     []any{},
+		},
+	}
+	return response, token, nil
+}
+
+// BuildUserObjectForUser returns an Emby-compatible User object for a regular user.
+func (m *AuthManager) BuildUserObjectForUser(user *User) map[string]any {
+	cfg := m.configStore.Snapshot()
+	return map[string]any{
+		"Name":                      user.Username,
+		"ServerId":                  cfg.Server.ID,
+		"Id":                        user.ID,
+		"HasPassword":               true,
+		"HasConfiguredPassword":     true,
+		"HasConfiguredEasyPassword": false,
+		"EnableAutoLogin":           false,
+		"Policy": map[string]any{
+			"IsAdministrator":                false,
+			"IsHidden":                       false,
+			"IsDisabled":                     false,
+			"EnableUserPreferenceAccess":     true,
+			"EnableContentDownloading":       true,
+			"EnableRemoteAccess":             true,
+			"EnableLiveTvAccess":             true,
+			"EnableLiveTvManagement":         false,
+			"EnableMediaPlayback":            true,
+			"EnableAudioPlaybackTranscoding": true,
+			"EnableVideoPlaybackTranscoding": true,
+			"EnablePlaybackRemuxing":         true,
+			"EnableContentDeletion":          false,
+			"EnableSyncTranscoding":          true,
+			"EnableMediaConversion":          true,
+			"EnableAllDevices":               true,
+			"EnableAllChannels":              true,
+			"EnableAllFolders":               true,
+			"EnablePublicSharing":            true,
+			"InvalidLoginAttemptCount":       0,
+			"RemoteClientBitrateLimit":       0,
+		},
+		"Configuration": map[string]any{
+			"PlayDefaultAudioTrack":      true,
+			"DisplayMissingEpisodes":     false,
+			"EnableLocalPassword":        false,
+			"HidePlayedInLatest":         true,
+			"RememberAudioSelections":    true,
+			"RememberSubtitleSelections": true,
+			"EnableNextEpisodeAutoPlay":  true,
+		},
+	}
+}
+
+// RevokeTokensByUserID removes all tokens belonging to a specific user.
+func (m *AuthManager) RevokeTokensByUserID(userID string) {
+	m.mu.Lock()
+	for token, info := range m.tokens {
+		if info.UserID == userID {
+			delete(m.tokens, token)
+			if m.identity != nil {
+				m.identity.DeleteCaptured(token)
+			}
+		}
+	}
+	m.mu.Unlock()
+	_ = m.save()
 }
 
 func (m *AuthManager) ProxyUserID() string {

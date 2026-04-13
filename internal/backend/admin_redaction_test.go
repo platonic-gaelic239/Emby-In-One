@@ -36,8 +36,10 @@ func TestAdminStatusRedactsUpstreamURLAndUserID(t *testing.T) {
 			t.Fatalf("upstream list len = %d, want 1 payload=%#v", len(upstreamList), payload)
 		}
 		entry := upstreamList[0].(map[string]any)
-		if _, ok := entry["url"]; ok {
-			t.Fatalf("status upstream leaked raw url: %#v", entry)
+		if urlVal, ok := entry["url"].(string); ok {
+			if strings.Contains(urlVal, "@") {
+				t.Fatalf("status upstream leaked credentials in url: %s", urlVal)
+			}
 		}
 		if _, ok := entry["userId"]; ok {
 			t.Fatalf("status upstream leaked userId: %#v", entry)

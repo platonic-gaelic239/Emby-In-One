@@ -1,5 +1,134 @@
 # Emby-In-One 更新日志
 
+## V1.4.0
+
+发布日期：2026-04-02
+
+> V1.4.0 在 V1.3.0 Go 后端基础上新增多用户管理、独立观看历史、并发播放数限制、内容权限过滤、SSH 面板在线更新、管理面板版本号显示和角色权限体系，同时修复了多个稳定性和前端交互问题。
+
+### 新功能：多用户管理
+
+- **UserStore**：基于 SQLite（与 IDStore 共享 `data/mappings.db`）存储用户数据，使用参数化查询防止 SQL 注入，内存缓存加速查询
+- **角色系统**：管理员（admin）和普通用户（user）两种角色。管理员拥有全部权限，普通用户仅能访问被分配的服务器
+- **认证流程**：三步认证链（管理员匹配 → UserStore 认证 → 401 拒绝），使用 scrypt 密码哈希
+- **Token 扩展**：Token 携带 Role 和 AllowedServers 字段，在每次 API 请求中自动过滤可访问的服务器
+- **管理 API**：`GET/POST/PUT/DELETE /admin/api/users`，仅管理员可访问（`requireAdmin` 中间件）
+- **管理面板**：新增「用户管理」页面，支持创建、编辑、启用/禁用、删除用户，可视化配置可访问服务器
+- **SSH 面板**：新增菜单项 12-14，支持查看用户列表、添加用户、删除用户
+
+### 新功能：独立观看历史
+
+由于所有分发用户共享上游 Emby 账户，上游观看进度/已播放/收藏是共享的。V1.4 新增基于本地 SQLite 的独立观看历史系统：
+
+- **管理员**保持上游行为不受影响
+- **普通用户**的观看进度、已播放状态、收藏、继续观看和接下来观看完全隔离在本地数据库中
+- 所有播放事件和用户操作**双写**至上游服务器和本地数据库
+- 播放完成（进度 ≥ 90%）自动标记为"已看"
+- 删除用户时自动清除其本地观看数据
+- 首次播放某项目时自动从上游获取元数据以支持 NextUp 计算
+
+### 新功能：并发播放数限制
+
+- 每台上游服务器可独立配置最大并发播放数 `maxConcurrent`
+- **PlaybackLimiter**：内存中跟踪每个 (用户ID, 服务器索引) 的播放状态
+- 播放中和进度上报时自动刷新心跳，3 分钟无心跳自动释放占用
+- 管理员豁免 `maxConcurrent` 限制
+- 超出限制时返回 `429 Too Many Requests`
+
+### 新功能：内容权限过滤
+
+- 普通用户只能看到和播放被分配服务器上的内容
+- `allowedClients(reqCtx)` 根据用户权限过滤在线客户端
+- `isServerAllowed(reqCtx, serverIndex)` 单服务器权限检查
+- 覆盖所有内容路由：UserViews、Items、搜索、媒体库、PlaybackInfo、流代理、Session 等
+- MediaSource 服务器切换时额外验证目标服务器权限
+
+### 新功能：聚合宽恕期与后台补全
+
+搜索和媒体聚合不再阻塞等待所有上游服务器响应——引入宽恕期机制，快速服务器的结果即时返回，慢速服务器在宽恕期窗口内继续汇入：
+
+- **三分离可配置宽恕期**：`searchGracePeriod`（搜索聚合，默认 3000ms）、`metadataGracePeriod`（元数据获取，默认 3000ms）、`latestGracePeriod`（最新添加，默认 0=等待所有服务器），管理面板超时设置区域可实时调整
+- **通用聚合框架**：新建 `aggregation.go` 封装 `aggregateUpstreams()` 统一处理多上游扇出、宽恕期等待、结果合并
+- **后台静默补全**：宽恕期超时后，后台 goroutine 继续收集剩余服务器结果并写入 ID 映射，不阻塞客户端响应，确保数据完整性
+- **元数据多实例并行获取**：`handleUserItemByID` 的多实例元数据获取从顺序改为并行 goroutine + 宽恕期，减少请求延迟叠加
+
+### 新功能：管理面板版本号显示
+
+管理面板侧边栏底部显示当前运行版本号（如 `Emby-In-One v1.4.0`），便于快速确认版本。版本号通过编译时注入，支持 `--version` 命令行标志。向后兼容 V1.3.0 旧二进制（不返回 version 字段时不渲染）。
+
+### 安全增强
+
+- **参数化 SQL 查询**：UserStore 使用 `prepare` + `bindAll` + `step` 参数化查询，防止 SQL 注入。移除 `sqlEscape` 函数
+- **Token 过期内存清理**：`save()` 遍历 Token 时，同时从内存中删除过期条目
+- **防御性权限检查**：`reqCtx == nil` 或 `ProxyUser == nil` 时返回 false / 空列表，防止上下文缺失导致越权
+- **并发限制防绕过**：通过聚合搜索选择不同服务器片源时，服务器切换前重新检查 `PlaybackLimiter.TryStart`
+- **Admin API CORS 同源检查加固**：管理 API 的 CORS 同源检查改为仅使用 `r.Host`，防止通过 `X-Forwarded-Host` 伪造绕过
+- **批量 ID 查询大小限制**：批量 `?Ids=` 查询参数新增 2000 个上限，防止恶意超大请求消耗资源
+- **SSH 面板 JSON 注入修复**：SSH 管理菜单中用户名/密码直接拼接到 curl JSON 请求体的安全隐患，已通过 `json_escape()` 转义函数修复
+- **UA 透传仅限管理员**：`passthrough` 模式下普通用户登录时不再捕获客户端 UA 标识（`SetCaptured`），仅管理员登录时采集，防止普通用户覆盖管理员已捕获的身份信息
+
+### 安全审计修复
+
+基于完整代码安全审计的修复，共修补 4 项漏洞：
+
+- **密码验证明文回退移除**（HIGH）：`VerifyPassword()` 在存储的密码不是 scrypt 哈希格式时，原先回退到明文常量时间比较。虽然 `ensureAdminPasswordHashed()` 在启动时已将明文密码转为哈希，但此回退路径属于纵深防御缺失。修复后 `VerifyPassword()` 在存储密码不匹配 scrypt 格式时直接返回 `false`
+- **代理测试 SSRF 防护**（CRITICAL）：`handleAdminProxyTest` 的 `targetUrl` 参数仅校验 `http(s)://` 格式，未限制为外部地址。已认证管理员可令代理向任意内网地址发请求（如云实例元数据 `169.254.169.254`）。新增 `isPrivateOrReservedIP()` 函数，DNS 解析后检查 `IsLoopback/IsPrivate/IsLinkLocalUnicast/IsUnspecified`，拦截私有/保留地址
+- **IP 欺骗绕过登录限速**（HIGH）：`clientIP()` 原先无条件信任 `X-Real-IP` / `X-Forwarded-For`，攻击者可伪造 IP 绕过限速。新增 `server.trustProxy` 配置项（默认 `false`），仅在 `trustProxy: true` 时才信任代理头。**部署在反向代理后的用户需在 `config.yaml` 的 `server` 段添加 `trustProxy: true`**
+- **限速器内存耗尽 DoS**（HIGH）：`loginRateLimiter.attempts` map 无容量上限，结合 IP 欺骗可无限增长导致内存耗尽。新增 10000 条上限（`loginMaxTrackedIPs`），超出容量时拒绝新 IP 登录请求
+
+### Bug 修复
+
+- 修复跨服务器播放时"继续观看"记录不更新：`translateSessionBodyIDs` 重写为独立解析每个 ID，目标服务器优先级改为 ItemId → MediaSourceId → PlaySessionId → ActiveStream
+- 修复前端管理面板交互失效：旧 Token 加载时自动迁移 Role；`api()` 检查 `response.ok`；处理 204 无 body 情况；所有 async 方法添加 try-catch
+- 修复前端网络代理检测显示 undefined：后端统一错误响应格式，前端添加 undefined 兜底
+- 修复 `install-release.sh` 中 `curl` 命令缺少超时参数
+- 修复选择保留配置和数据的卸载选项时，`find` 命令会意外删除整个项目目录
+- 修复SSH 面板输出中 ANSI 颜色转义序列未渲染为颜色
+- 修复SSH 面板所有交互式输入中退格键不会删除字符，而是输出 `^H`
+- 修复管理面板代理连通性测试在上游返回 403（如 Cloudflare 拦截）时误报"连通失败"：改为只要收到 HTTP 响应即视为连通成功
+- 修复 Docker 模式下"下载指定版本"下载 Release 二进制而非重建镜像的问题：拆分为 Binary/Docker 双模式下载安装路径
+- 修复观看进度 UPSERT 仅更新 `position_ticks` 而未更新 `played` 和 `is_favorite`，导致已完成剧集被进度事件重置为"未看"并反复出现在 Resume 列表
+- 修复子用户无本地观看记录时上游管理员的 `Played/IsFavorite/PlaybackPositionTicks` 泄露至普通用户页面——无记录时主动清除上游 UserData
+- 修复 `GET /Items/{itemId}` 单条目路由缺少观看状态叠加调用，导致详情页显示上游管理员的观看标记
+- 修复 Resume 首页同一部剧集显示多集：新增 SQL 窗口函数系列级聚合（`ROW_NUMBER() OVER PARTITION BY series_name`），每部剧集只保留最近一集进度
+- 修复启动时脏数据（播放进度 ≥ 90% 但 `played` 仍为 0）导致 Resume 列表膨胀：启动时自动幂等迁移修正
+- 修复管理面板普通用户可登录空白界面：`doLogin()` 增加 `/admin/api/status` 权限验证，非管理员提示并退出
+- 修复 Passthrough 模式首次登录使用 Infuse 伪装身份被持久化，导致后续设备受限服务器全部 403：`recordSuccessfulIdentity()` 排除 `infuse-fallback` 来源
+- 修复管理员浏览器登录时浏览器 UA 污染透传身份缓存：添加 `hasPassthroughIdentity` 前置检查
+- 修复管理面板不显示上游节点地址：`handleAdminStatus` 字段名 `host` → `url` 与前端模板对齐
+- 修复上游服务器离线/断开/删除后，以该服务器为元数据源的内容返回 404"找不到项目"：`resolveRouteID()` 和 `resolveFallbackTarget()` 增加 OtherInstances 回退，自动路由到持有相同内容的在线服务器
+- 修复上游服务器离线后普通用户的"继续观看"和"接下来观看"全部消失：`enrichWatchItems()` 和 `handleLocalNextUp()` 新增离线重映射逻辑，通过 IDStore 查找在线替代服务器获取元数据
+
+#### 稳定性修复
+
+- 修复 ID 映射中 `activeStreamServer` 内存泄漏：过期条目未被清理，长时间运行后无限累积。已补充 TTL 淘汰逻辑
+- 修复客户端身份持久化数据丢失：JSON 文件损坏时覆盖写入导致数据清零。已改为遇到错误时中止写入
+- 修复数据库操作错误静默忽略：关键数据库操作失败时不记录日志。已补充条件日志输出
+- 进行了高聚合代码的拆分，保证项目易读性和易维护性
+- 新增 `install-release.sh` 中 `systemctl` 可用性检查，不可用时提示用户手动启动
+- 增强 `go_install.sh` 密码生成鲁棒性：初始熵从 12 字节增加到 24 字节，确保截取密码长度充足
+
+### Passthrough 延迟登录
+
+`passthrough` 模式的上游不再在 `LoginAll()` 启动时使用 Infuse 身份尝试登录。新增 `HasCapturedHeaders()` 方法检测是否已有捕获的客户端身份，无已捕获身份时跳过登录。上游保持 Offline 状态直到真实客户端连接后自动完成认证，避免在上游 Emby 产生虚假 Infuse 设备记录。
+
+### SSH 管理菜单增强
+
+#### CLI 双模式部署
+
+SSH 管理菜单新增 Binary/Docker 自动检测。所有操作（启动/停止/重启/更新/状态/日志/卸载/用户管理）自动分发到 systemd 或 Docker Compose 对应命令。
+
+- **Binary 模式更新**：下载并执行 `release-install.sh`，自动停止/升级/重启 systemd 服务
+- **Docker 模式更新**：源码重建流程——下载最新源码 → 替换源码（保留 config/data/log）→ 重建镜像 → 重启容器
+- **Binary 模式状态**：显示 systemd 运行状态、PID、内存占用、运行时长、监听端口
+- **菜单显示版本号**：标题栏显示当前版本号
+
+#### CLI 自替换安全修复
+
+修复 `do_update()` 使用 `cp` 直接覆盖正在执行的脚本导致 bash 懒读取出错的问题。改为 temp + `mv` 原子替换模式，`mv` 在同一文件系统上执行 `rename()` 系统调用，运行中的 bash 进程仍持有旧 inode 的文件描述符，可安全读完当前脚本。
+
+---
+
 ## V1.3.1
 发布日期：2026-04-02
 
@@ -24,6 +153,8 @@
 - 修复 `distribution_test.go` 中 `repoRootPath()` 路径层级错误
 - 修复 `TestAdminHTMLSaveServerHandlesUpstreamErrors` 测试断言与实际 HTML 不匹配
 - 导出 `TokenFileMode()` 确保 CLI 与核心模块使用一致的文件权限策略
+
+---
 
 ## V1.3 (Pre-release)
 发布日期：2026-03-30

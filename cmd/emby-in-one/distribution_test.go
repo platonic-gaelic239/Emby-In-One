@@ -8,7 +8,6 @@ import (
 )
 
 func repoRootPath() string {
-	// cmd/emby-in-one → project root is two levels up
 	return filepath.Clean(filepath.Join("..", ".."))
 }
 
@@ -133,29 +132,33 @@ func TestInstallScriptsHaveSingleValidScriptDirAssignment(t *testing.T) {
 
 func TestAdminHTMLSaveServerHandlesUpstreamErrors(t *testing.T) {
 	root := repoRootPath()
+	// After Phase 3 refactoring, JS was extracted to admin.js; check both files.
 	candidates := existingPaths(
 		filepath.Join(root, "public", "admin.html"),
+		filepath.Join(root, "public", "admin.js"),
 		filepath.Join(root, "Emby-In-One-Go", "public", "admin.html"),
+		filepath.Join(root, "Emby-In-One-Go", "public", "admin.js"),
 	)
+	var combined string
 	for _, path := range candidates {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		text := string(data)
-		for _, fragment := range []string{
-			"async saveServer()",
-			"const res = await this.api(",
-			"'/admin/api/upstream'",
-			"res.error",
-			"alert('保存失败：' + res.error)",
-			"res.warning",
-			"alert('提示：' + res.warning)",
-			"await this.refreshServers();",
-		} {
-			if !strings.Contains(text, fragment) {
-				t.Fatalf("admin.html %s saveServer is missing %q", path, fragment)
-			}
+		combined += string(data) + "\n"
+	}
+	for _, fragment := range []string{
+		"async saveServer()",
+		"const res = await this.api(",
+		"'/admin/api/upstream'",
+		"res.warning",
+		"res.warning);",
+		"await this.refreshServers();",
+		"catch (e)",
+		"e.message",
+	} {
+		if !strings.Contains(combined, fragment) {
+			t.Fatalf("admin.html+admin.js is missing %q", fragment)
 		}
 	}
 }

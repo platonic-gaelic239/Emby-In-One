@@ -200,6 +200,21 @@ func (s *ClientIdentityService) GetLastSuccess(serverKey string) http.Header {
 	return cloneHeader(entry.headers)
 }
 
+// HasCapturedHeaders returns true if we have any captured identity usable for
+// the given server key: a specific last-success entry, or a global latestCaptured
+// fallback (indicating a real client has connected recently).
+func (s *ClientIdentityService) HasCapturedHeaders(serverKey string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if entry, ok := s.lastSuccessByServer[serverKey]; ok && isRealClientIdentity(entry.headers) {
+		return true
+	}
+	if s.latestCaptured != nil && isRealClientIdentity(s.latestCaptured.headers) {
+		return true
+	}
+	return false
+}
+
 func (s *ClientIdentityService) RegisterCaptureListener(listener func(string, http.Header)) {
 	if listener == nil {
 		return
@@ -275,6 +290,33 @@ func mergePassthroughHeaders(source http.Header) http.Header {
 	return headers
 }
 
+func parseAuthorizationIdentity(header string) map[string]string {
+	result := map[string]string{}
+	if header == "" {
+		return result
+	}
+	for _, prefix := range []string{"MediaBrowser ", "Emby "} {
+		if strings.HasPrefix(header, prefix) {
+			header = header[len(prefix):]
+			break
+		}
+	}
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		eqIdx := strings.Index(part, "=")
+		if eqIdx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(part[:eqIdx])
+		val := strings.TrimSpace(part[eqIdx+1:])
+		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+			val = val[1 : len(val)-1]
+		}
+		result[key] = val
+	}
+	return result
+}
+
 func normalizeCapturedHeaders(headers http.Header) http.Header {
 	copied := http.Header{}
 	for _, key := range []string{"User-Agent", "X-Emby-Client", "X-Emby-Client-Version", "X-Emby-Device-Name", "X-Emby-Device-Id", "Accept", "Accept-Language", "X-Emby-Authorization", "Authorization"} {
@@ -282,7 +324,33 @@ func normalizeCapturedHeaders(headers http.Header) http.Header {
 			copied[key] = append([]string(nil), values...)
 		}
 	}
+	// Fill missing individual headers from compound authorization header
+	if copied.Get("X-Emby-Client") == "" || copied.Get("X-Emby-Device-Name") == "" || copied.Get("X-Emby-Device-Id") == "" {
+		for _, authKey := range []string{"X-Emby-Authorization", "Authorization"} {
+			authVal := copied.Get(authKey)
+			if authVal == "" {
+				continue
+			}
+			parsed := parseAuthorizationIdentity(authVal)
+			mapping := map[string]string{
+				"X-Emby-Client":         parsed["Client"],
+				"X-Emby-Client-Version": parsed["Version"],
+				"X-Emby-Device-Name":    parsed["Device"],
+				"X-Emby-Device-Id":      parsed["DeviceId"],
+			}
+			for hdr, val := range mapping {
+				if copied.Get(hdr) == "" && val != "" {
+					copied.Set(hdr, val)
+				}
+			}
+			break
+		}
+	}
 	return copied
+}
+
+func isRealClientIdentity(headers http.Header) bool {
+	return hasPassthroughIdentity(headers) && headers.Get("X-Emby-Device-Id") != "infuse-spoof-id"
 }
 
 func hasPassthroughIdentity(headers http.Header) bool {

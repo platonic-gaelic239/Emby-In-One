@@ -3,6 +3,7 @@ package backend
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestIDStorePersistsAdditionalInstances(t *testing.T) {
@@ -61,5 +62,30 @@ func TestIDStoreUpdatesAdditionalInstancesOnShiftAndDelete(t *testing.T) {
 	resolved = store.ResolveVirtualID(virtualID)
 	if len(resolved.OtherInstances) != 0 {
 		t.Fatalf("other instances = %#v, want empty", resolved.OtherInstances)
+	}
+}
+
+func TestEvictExpiredStreamURLs_CleansActiveStreamServer(t *testing.T) {
+	store, _ := NewIDStore("", nil)
+	defer store.Close()
+
+	store.SetActiveStream("vid-1", 0)
+	store.SetActiveStream("vid-2", 1)
+
+	// Manually expire one entry
+	store.mu.Lock()
+	store.activeStreamServer["vid-1"] = activeStreamEntry{
+		ServerIndex: 0,
+		CreatedAt:   time.Now().Add(-5 * time.Hour),
+	}
+	store.mu.Unlock()
+
+	store.evictExpiredStreamURLs()
+
+	if _, ok := store.GetActiveStream("vid-1"); ok {
+		t.Error("expired activeStream entry was not evicted")
+	}
+	if _, ok := store.GetActiveStream("vid-2"); !ok {
+		t.Error("non-expired activeStream entry was incorrectly evicted")
 	}
 }

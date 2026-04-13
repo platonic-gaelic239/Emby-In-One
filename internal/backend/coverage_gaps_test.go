@@ -214,7 +214,7 @@ func TestSubtitlePathResolvesMediaSourceID(t *testing.T) {
 	})
 }
 
-// Phase 4.5: Test token persistence (tokens never expire, only removed by revocation)
+// Phase 4.5: Test token never expires — tokens are only removed by explicit revocation
 func TestTokenNeverExpires(t *testing.T) {
 	config := "server:\n  port: 8096\n  name: \"Test\"\n  id: \"svr\"\nadmin:\n  username: \"admin\"\n  password: \"secret\"\nplayback:\n  mode: \"proxy\"\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\nproxies: []\nupstream: []\n"
 
@@ -227,7 +227,7 @@ func TestTokenNeverExpires(t *testing.T) {
 			t.Fatalf("valid token rejected: status=%d", rr.Code)
 		}
 
-		// Set token creation time to far in the past (simulating months of inactivity)
+		// Set creation time to 90 days ago — token should still be valid
 		app.Auth.mu.Lock()
 		if info, ok := app.Auth.tokens[token]; ok {
 			info.CreatedAt = time.Now().Add(-90 * 24 * time.Hour).UnixMilli()
@@ -235,13 +235,13 @@ func TestTokenNeverExpires(t *testing.T) {
 		}
 		app.Auth.mu.Unlock()
 
-		// Token should still be accepted — tokens never expire
+		// Token should still work on an auth-required endpoint (it never expires)
 		rr = doJSONRequest(t, handler, http.MethodGet, "/Users/"+app.Auth.ProxyUserID()+"/Views", nil, token)
-		if rr.Code == http.StatusUnauthorized {
-			t.Fatalf("token should never expire, but got 401")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("old token rejected: status=%d, want 200 (tokens never expire)", rr.Code)
 		}
 
-		// After explicit revocation, token should be rejected
+		// But explicit revocation should work
 		app.Auth.RevokeToken(token)
 		rr = doJSONRequest(t, handler, http.MethodGet, "/Users/"+app.Auth.ProxyUserID()+"/Views", nil, token)
 		if rr.Code != http.StatusUnauthorized {

@@ -6,7 +6,7 @@ set -e
 # ╚════════════════════════════════════════════════════╝
 
 PROJECT_DIR="/opt/emby-in-one"
-# 远程安装时使用的 tarball 地址（上传到 GitHub 后填写）
+# 远程安装时使用的 tarball 地址
 REPO_URL="https://github.com/ArizeSky/Emby-In-One/archive/refs/heads/main.tar.gz"
 
 # ── 颜色 ──
@@ -163,14 +163,15 @@ copy_item() {
 
 write_runtime_dockerfile() {
   cat > "${PROJECT_DIR}/Dockerfile" <<'EOF'
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.23-bookworm AS builder
+ARG VERSION=dev
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY go.mod ./
 COPY third_party ./third_party
 COPY cmd ./cmd
 COPY internal ./internal
-RUN mkdir -p /out && CGO_ENABLED=1 go build -o /out/emby-in-one ./cmd/emby-in-one
+RUN CGO_ENABLED=1 go build -ldflags="-s -w -X main.Version=${VERSION}" -o /out/emby-in-one ./cmd/emby-in-one
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
@@ -187,7 +188,10 @@ write_runtime_compose() {
   cat > "${PROJECT_DIR}/docker-compose.yml" <<'EOF'
 services:
   emby-in-one:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: v1.4.0
     container_name: emby-in-one
     ports:
       - "8096:8096"

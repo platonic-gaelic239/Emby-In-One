@@ -58,6 +58,15 @@ func (p *UpstreamPool) runHealthCheckCycle(ctx context.Context) {
 		if client == nil || client.IsOnline() {
 			continue
 		}
+		// Skip passthrough upstreams without any captured client identity
+		if client.Config.SpoofClient == "passthrough" && client.Config.APIKey == "" {
+			if identity == nil || !identity.HasCapturedHeaders(client.serverKey) {
+				if logger != nil {
+					logger.Debugf("[%s] Health check: passthrough skip — no captured client identity yet", client.Name)
+				}
+				continue
+			}
+		}
 		offline++
 		if logger != nil {
 			logger.Debugf("[%s] Health check: offline, attempting re-login...", client.Name)

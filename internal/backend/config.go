@@ -23,9 +23,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port int
-	Name string
-	ID   string
+	Port       int
+	Name       string
+	ID         string
+	TrustProxy bool
 }
 
 type AdminConfig struct {
@@ -38,11 +39,14 @@ type PlaybackConfig struct {
 }
 
 type TimeoutsConfig struct {
-	API            int
-	Global         int
-	Login          int
-	HealthCheck    int
-	HealthInterval int
+	API                 int
+	Global              int
+	Login               int
+	HealthCheck         int
+	HealthInterval      int
+	SearchGracePeriod   int // 搜索/批量聚合宽恕期 (ms)，默认 3000
+	MetadataGracePeriod int // 元数据多实例获取宽恕期 (ms)，默认 3000
+	LatestGracePeriod   int // 最新添加宽恕期 (ms)，0=禁用
 }
 
 type ProxyConfig struct {
@@ -68,6 +72,7 @@ type UpstreamConfig struct {
 	CustomClientVersion string
 	CustomDeviceName    string
 	CustomDeviceId      string
+	MaxConcurrent       int
 }
 
 type ConfigStore struct {
@@ -129,6 +134,13 @@ func LoadConfigStore() (*ConfigStore, error) {
 	if cfg.Timeouts.HealthInterval == 0 {
 		cfg.Timeouts.HealthInterval = 60000
 	}
+	if cfg.Timeouts.SearchGracePeriod == 0 {
+		cfg.Timeouts.SearchGracePeriod = 3000
+	}
+	if cfg.Timeouts.MetadataGracePeriod == 0 {
+		cfg.Timeouts.MetadataGracePeriod = 3000
+	}
+	// LatestGracePeriod 默认 0：禁用，等待所有服务器返回
 	if cfg.Admin.Username == "" || cfg.Admin.Password == "" {
 		return nil, errors.New("config: admin.username and admin.password are required")
 	}
@@ -388,6 +400,8 @@ func assignSectionField(cfg *Config, section, key, value string) {
 			cfg.Server.Name = parseStringValue(value)
 		case "id":
 			cfg.Server.ID = parseStringValue(value)
+		case "trustProxy":
+			cfg.Server.TrustProxy = parseBoolValue(value)
 		}
 	case "admin":
 		switch key {
@@ -412,6 +426,12 @@ func assignSectionField(cfg *Config, section, key, value string) {
 			cfg.Timeouts.HealthCheck = parseIntValue(value)
 		case "healthInterval":
 			cfg.Timeouts.HealthInterval = parseIntValue(value)
+		case "searchGracePeriod":
+			cfg.Timeouts.SearchGracePeriod = parseIntValue(value)
+		case "metadataGracePeriod":
+			cfg.Timeouts.MetadataGracePeriod = parseIntValue(value)
+		case "latestGracePeriod":
+			cfg.Timeouts.LatestGracePeriod = parseIntValue(value)
 		}
 	}
 }
@@ -463,6 +483,8 @@ func assignListField(cfg *Config, listName string, index int, key, value string)
 			upstream.CustomDeviceName = parseStringValue(value)
 		case "customDeviceId":
 			upstream.CustomDeviceId = parseStringValue(value)
+		case "maxConcurrent":
+			upstream.MaxConcurrent = parseIntValue(value)
 		}
 	}
 }
@@ -477,7 +499,11 @@ func renderConfigYAML(cfg *Config) string {
 	b.WriteString("server:\n")
 	fmt.Fprintf(&b, "  port: %d\n", cfg.Server.Port)
 	fmt.Fprintf(&b, "  name: %s\n", yamlStr(cfg.Server.Name))
-	fmt.Fprintf(&b, "  id: %s\n\n", yamlStr(cfg.Server.ID))
+	fmt.Fprintf(&b, "  id: %s\n", yamlStr(cfg.Server.ID))
+	if cfg.Server.TrustProxy {
+		b.WriteString("  trustProxy: true\n")
+	}
+	b.WriteString("\n")
 
 	b.WriteString("admin:\n")
 	fmt.Fprintf(&b, "  username: %s\n", yamlStr(cfg.Admin.Username))
@@ -491,7 +517,10 @@ func renderConfigYAML(cfg *Config) string {
 	fmt.Fprintf(&b, "  global: %d\n", cfg.Timeouts.Global)
 	fmt.Fprintf(&b, "  login: %d\n", cfg.Timeouts.Login)
 	fmt.Fprintf(&b, "  healthCheck: %d\n", cfg.Timeouts.HealthCheck)
-	fmt.Fprintf(&b, "  healthInterval: %d\n\n", cfg.Timeouts.HealthInterval)
+	fmt.Fprintf(&b, "  healthInterval: %d\n", cfg.Timeouts.HealthInterval)
+	fmt.Fprintf(&b, "  searchGracePeriod: %d\n", cfg.Timeouts.SearchGracePeriod)
+	fmt.Fprintf(&b, "  metadataGracePeriod: %d\n", cfg.Timeouts.MetadataGracePeriod)
+	fmt.Fprintf(&b, "  latestGracePeriod: %d\n\n", cfg.Timeouts.LatestGracePeriod)
 
 	if len(cfg.Proxies) == 0 {
 		b.WriteString("proxies: []\n\n")
@@ -552,6 +581,9 @@ func renderConfigYAML(cfg *Config) string {
 			}
 			if upstream.PriorityMetadata {
 				fmt.Fprintf(&b, "    priorityMetadata: true\n")
+			}
+			if upstream.MaxConcurrent > 0 {
+				fmt.Fprintf(&b, "    maxConcurrent: %d\n", upstream.MaxConcurrent)
 			}
 		}
 	}

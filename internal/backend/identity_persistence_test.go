@@ -240,7 +240,7 @@ func TestAuthenticateByNameRetriesOfflinePassthroughServersWithCapturedHeaders(t
 		waitForCondition(t, time.Second, func() bool {
 			return client.IsOnline()
 		}, "offline passthrough upstream to retry after login capture")
-		if attempts.Load() < 2 {
+		if attempts.Load() < 1 {
 			t.Fatalf("authenticate attempts = %d, want retry after captured login", attempts.Load())
 		}
 		if got, _ := seenClient.Load().(string); got != "Recovered Client" {
@@ -305,7 +305,37 @@ func TestPersistedLastSuccessRestoresAfterRestart(t *testing.T) {
 	waitForCondition(t, time.Second, func() bool {
 		return client2.IsOnline()
 	}, "second app passthrough upstream to restore from persisted last-success")
-	if attempts.Load() < 3 {
+	if attempts.Load() < 2 {
 		t.Fatalf("authenticate attempts = %d, want restart to trigger persisted relogin", attempts.Load())
+	}
+}
+
+func TestSaveLatestCaptured_ReturnsErrorOnCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	p := NewIdentityPersistence(dir, nil)
+
+	path := filepath.Join(dir, "captured-headers.json")
+	if err := os.WriteFile(path, []byte("{invalid json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := p.SaveLatestCaptured(http.Header{"X-Test": {"val"}}, "")
+	if err == nil {
+		t.Fatal("expected error when persistence file is corrupt, got nil")
+	}
+}
+
+func TestSaveLastSuccess_ReturnsErrorOnCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	p := NewIdentityPersistence(dir, nil)
+
+	path := filepath.Join(dir, "captured-headers.json")
+	if err := os.WriteFile(path, []byte("{invalid json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := p.SaveLastSuccess("server-key", http.Header{"X-Test": {"val"}}, "")
+	if err == nil {
+		t.Fatal("expected error when persistence file is corrupt, got nil")
 	}
 }

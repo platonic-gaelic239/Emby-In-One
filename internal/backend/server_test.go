@@ -300,7 +300,7 @@ func TestAdminSettingsUpstreamAndProxyCrud(t *testing.T) {
 		proxyDeleteReq.Header.Set("X-Emby-Token", token)
 		proxyDeleteRR := httptest.NewRecorder()
 		handler.ServeHTTP(proxyDeleteRR, proxyDeleteReq)
-		if proxyDeleteRR.Code != http.StatusNoContent {
+		if proxyDeleteRR.Code != http.StatusOK {
 			t.Fatalf("delete proxy status = %d, body=%s", proxyDeleteRR.Code, proxyDeleteRR.Body.String())
 		}
 	})
@@ -336,8 +336,6 @@ func TestAdminLogsEndpoints(t *testing.T) {
 		}
 	})
 }
-
-
 
 func TestSystemInfoPublicUsesRequestHostForLocalAddress(t *testing.T) {
 	withTempApp(t, func(app *App, handler http.Handler) {

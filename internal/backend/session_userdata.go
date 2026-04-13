@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 )
@@ -43,20 +44,45 @@ func decodeOptionalJSON(r *http.Request) (any, error) {
 }
 
 func (a *App) translateSessionBodyIDs(body map[string]any) (int, bool) {
-	serverIndex := -1
-	// 1. Identify target server: prefer MediaSourceId, then ItemId, then PlaySessionId
-	for _, key := range []string{"MediaSourceId", "ItemId", "PlaySessionId"} {
+	// Resolve each ID independently to its OWN server's original value.
+	// This matches the Node.js reference implementation where each virtual ID
+	// is translated to its own server's original regardless of the target server.
+	//
+	// Target server priority: ItemId → MediaSourceId → PlaySessionId → ActiveStream.
+	// This ensures session events are routed to the server that owns the episode
+	// (ItemId), not the server that owns the media source. The upstream Emby
+	// associates resume/progress data with ItemId, so the ItemId must be valid
+	// on the target server.
+
+	type resolvedID struct {
+		OriginalID  string
+		ServerIndex int
+	}
+
+	resolutions := map[string]*resolvedID{} // key → resolved
+	for _, key := range []string{"ItemId", "MediaSourceId", "PlaySessionId"} {
 		text, _ := body[key].(string)
 		if text == "" {
 			continue
 		}
 		resolved := a.IDStore.ResolveVirtualID(text)
 		if resolved == nil {
-			// Fallback: client sent original upstream ID instead of virtual ID
 			resolved = a.IDStore.ResolveByOriginalID(text)
 		}
 		if resolved != nil {
-			serverIndex = resolved.ServerIndex
+			resolutions[key] = &resolvedID{
+				OriginalID:  resolved.OriginalID,
+				ServerIndex: resolved.ServerIndex,
+			}
+			body[key] = resolved.OriginalID
+		}
+	}
+
+	// Determine target server: prefer ItemId's server (matches Node.js)
+	serverIndex := -1
+	for _, key := range []string{"ItemId", "MediaSourceId", "PlaySessionId"} {
+		if r, ok := resolutions[key]; ok {
+			serverIndex = r.ServerIndex
 			break
 		}
 	}
@@ -70,55 +96,116 @@ func (a *App) translateSessionBodyIDs(body map[string]any) (int, bool) {
 		}
 	}
 
-	if serverIndex < 0 {
-		return -1, false
-	}
-
-	// 2. Translate all IDs in body to the target server's original IDs
-	for _, key := range []string{"MediaSourceId", "ItemId", "PlaySessionId"} {
-		text, _ := body[key].(string)
-		if text == "" {
-			continue
-		}
-		resolved := a.IDStore.ResolveVirtualID(text)
-		if resolved == nil {
-			// Client sent original upstream ID — no translation needed if it's already correct
-			resolved = a.IDStore.ResolveByOriginalID(text)
-			if resolved == nil {
-				continue
-			}
-			// Already an original ID for the right server, nothing to rewrite
-			if resolved.ServerIndex == serverIndex {
-				continue
-			}
-		}
-
-		if resolved.ServerIndex == serverIndex {
-			body[key] = resolved.OriginalID
-		} else {
-			// Cross-server instance: try to find an instance of this item on the target server
-			found := false
-			for _, inst := range resolved.OtherInstances {
-				if inst.ServerIndex == serverIndex {
-					body[key] = inst.OriginalID
-					found = true
-					break
-				}
-			}
-			if !found && a.Logger != nil {
-				a.Logger.Warnf("Session translation: %s (%s) has no instance on target server %d",
-					key, text, serverIndex)
-				// Keep virtual or remove? Emby might fail if it's virtual.
-				// Better to keep it virtual if we can't find an original, or maybe the upstream will just ignore it.
-			}
-		}
-	}
-
 	if a.Logger != nil {
 		a.Logger.Debugf("Session translation: TargetServer=%d, MediaSourceId=%v, ItemId=%v, PlaySessionId=%v",
 			serverIndex, body["MediaSourceId"], body["ItemId"], body["PlaySessionId"])
 	}
 	return serverIndex, serverIndex >= 0
+}
+
+// recordSessionToWatchStore writes playback progress to the local WatchStore
+// for non-admin users. virtualItemID is the pre-translation virtual ID.
+// isStopped indicates whether the playback has ended (Stopped event).
+func (a *App) recordSessionToWatchStore(r *http.Request, virtualItemID string, body map[string]any, serverIndex int, isStopped bool) {
+	if a.WatchStore == nil || virtualItemID == "" {
+		return
+	}
+	reqCtx := requestContextFrom(r.Context())
+	if reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.Role == "admin" {
+		return
+	}
+	positionTicks, _ := numericInt64(body["PositionTicks"])
+	runtimeTicks, _ := numericInt64(body["RunTimeTicks"])
+	originalItemID, _ := body["ItemId"].(string)
+
+	p := &WatchProgress{
+		ProxyUserID:    reqCtx.ProxyUser.UserID,
+		VirtualItemID:  virtualItemID,
+		ServerIndex:    serverIndex,
+		OriginalItemID: originalItemID,
+		PositionTicks:  positionTicks,
+		RuntimeTicks:   runtimeTicks,
+	}
+
+	// Auto-mark played if stopped near end (>= 90% of runtime)
+	if isStopped && runtimeTicks > 0 && positionTicks > 0 {
+		ratio := float64(positionTicks) / float64(runtimeTicks)
+		if ratio >= 0.90 {
+			p.Played = true
+			p.PositionTicks = 0
+		}
+	}
+
+	// Enrich with item metadata if not already stored
+	existing := a.WatchStore.GetProgress(reqCtx.ProxyUser.UserID, virtualItemID)
+	if existing == nil || existing.ItemType == "" {
+		a.enrichWatchProgressMetadata(r, reqCtx, p, originalItemID, serverIndex)
+	}
+
+	if err := a.WatchStore.RecordProgress(p); err != nil {
+		if a.Logger != nil {
+			a.Logger.Warnf("WatchStore record error: %v", err)
+		}
+	}
+}
+
+// enrichWatchProgressMetadata fetches item details from upstream and populates
+// metadata fields on the WatchProgress (type, series info, name, etc.).
+func (a *App) enrichWatchProgressMetadata(r *http.Request, reqCtx *RequestContext, p *WatchProgress, originalItemID string, serverIndex int) {
+	client := a.Upstream.GetClient(serverIndex)
+	if client == nil || !client.IsOnline() || originalItemID == "" {
+		return
+	}
+	q := url.Values{}
+	q.Set("Fields", "ProviderIds")
+	payload, err := client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Users/"+client.UserID+"/Items/"+originalItemID, q, nil)
+	if err != nil {
+		return
+	}
+	item, ok := payload.(map[string]any)
+	if !ok {
+		return
+	}
+	p.ItemType, _ = item["Type"].(string)
+	p.Name, _ = item["Name"].(string)
+	if year, ok := numericInt(item["ProductionYear"]); ok {
+		p.ProductionYear = year
+	}
+	if providerIDs, ok := item["ProviderIds"].(map[string]any); ok {
+		p.ProviderTmdb, _ = providerIDs["Tmdb"].(string)
+	}
+	if rt, ok := numericInt64(item["RunTimeTicks"]); ok && rt > 0 && p.RuntimeTicks == 0 {
+		p.RuntimeTicks = rt
+	}
+
+	// Episode-specific: series info
+	if p.ItemType == "Episode" {
+		p.SeriesName, _ = item["SeriesName"].(string)
+		if parentIdx, ok := numericInt(item["ParentIndexNumber"]); ok {
+			p.ParentIndexNumber = parentIdx
+		}
+		if idx, ok := numericInt(item["IndexNumber"]); ok {
+			p.IndexNumber = idx
+		}
+		// Map seriesId to virtual
+		if seriesID, _ := item["SeriesId"].(string); seriesID != "" {
+			p.SeriesOriginalID = seriesID
+			p.SeriesVirtualID = a.IDStore.GetOrCreateVirtualID(seriesID, serverIndex)
+		}
+	}
+}
+
+// numericInt64 extracts an int64 from a JSON number (float64) or returns 0.
+func numericInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(math.Round(n)), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	}
+	return 0, false
 }
 
 func (a *App) translateMediaSourceQuery(values url.Values) {
@@ -190,6 +277,7 @@ func (a *App) handleSessionPlaying(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Invalid session payload"})
 		return
 	}
+	virtualItemID, _ := body["ItemId"].(string) // capture before translation
 	serverIndex, found := a.translateSessionBodyIDs(body)
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Cannot determine target server"})
@@ -204,7 +292,12 @@ func (a *App) handleSessionPlaying(w http.ResponseWriter, r *http.Request) {
 		if a.Logger != nil {
 			a.Logger.Warnf("Sessions/Playing upstream error (server %d): %v", serverIndex, err)
 		}
-		// Return 204 anyway — session reporting is best-effort and client must not break
+	}
+	a.recordSessionToWatchStore(r, virtualItemID, body, serverIndex, false)
+	if a.PlaybackLimiter != nil {
+		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
+			a.PlaybackLimiter.Heartbeat(reqCtx.ProxyUser.UserID, serverIndex)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -220,6 +313,7 @@ func (a *App) handleSessionPlayingProgress(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	virtualItemID, _ := body["ItemId"].(string)
 	serverIndex, found := a.translateSessionBodyIDs(body)
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
@@ -231,6 +325,12 @@ func (a *App) handleSessionPlayingProgress(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	_ = a.forwardNoContent(r, client, http.MethodPost, "/Sessions/Playing/Progress", nil, body)
+	a.recordSessionToWatchStore(r, virtualItemID, body, serverIndex, false)
+	if a.PlaybackLimiter != nil {
+		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
+			a.PlaybackLimiter.Heartbeat(reqCtx.ProxyUser.UserID, serverIndex)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -245,6 +345,7 @@ func (a *App) handleSessionPlayingStopped(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	virtualItemID, _ := body["ItemId"].(string)
 	serverIndex, found := a.translateSessionBodyIDs(body)
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
@@ -256,13 +357,20 @@ func (a *App) handleSessionPlayingStopped(w http.ResponseWriter, r *http.Request
 		return
 	}
 	_ = a.forwardNoContent(r, client, http.MethodPost, "/Sessions/Playing/Stopped", nil, body)
+	a.recordSessionToWatchStore(r, virtualItemID, body, serverIndex, true)
+	if a.PlaybackLimiter != nil {
+		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
+			a.PlaybackLimiter.Stop(reqCtx.ProxyUser.UserID, serverIndex)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) handleSessionsCapabilities(w http.ResponseWriter, r *http.Request) {
 	body, err := decodeOptionalJSON(r)
 	if err == nil {
-		for _, client := range a.Upstream.OnlineClients() {
+		reqCtx := requestContextFrom(r.Context())
+		for _, client := range a.allowedClients(reqCtx) {
 			_ = a.forwardNoContent(r, client, http.MethodPost, "/Sessions/Capabilities", cloneValues(r.URL.Query()), body)
 		}
 	}
@@ -272,7 +380,8 @@ func (a *App) handleSessionsCapabilities(w http.ResponseWriter, r *http.Request)
 func (a *App) handleSessionsCapabilitiesFull(w http.ResponseWriter, r *http.Request) {
 	body, err := decodeOptionalJSON(r)
 	if err == nil {
-		for _, client := range a.Upstream.OnlineClients() {
+		reqCtx := requestContextFrom(r.Context())
+		for _, client := range a.allowedClients(reqCtx) {
 			_ = a.forwardNoContent(r, client, http.MethodPost, "/Sessions/Capabilities/Full", nil, body)
 		}
 	}
@@ -301,19 +410,8 @@ func (a *App) handleUserPlayingItem(w http.ResponseWriter, r *http.Request, meth
 }
 
 func (a *App) handleUserItemUserData(w http.ResponseWriter, r *http.Request) {
-	a.handleResolvedJSONMutation(w, r, http.MethodPost, "/Users/%s/Items/%s/UserData")
-}
-
-func (a *App) handleFavoriteItemAdd(w http.ResponseWriter, r *http.Request) {
-	a.handleResolvedJSONMutation(w, r, http.MethodPost, "/Users/%s/FavoriteItems/%s")
-}
-
-func (a *App) handleFavoriteItemRemove(w http.ResponseWriter, r *http.Request) {
-	a.handleResolvedJSONMutation(w, r, http.MethodDelete, "/Users/%s/FavoriteItems/%s")
-}
-
-func (a *App) handleResolvedJSONMutation(w http.ResponseWriter, r *http.Request, method, pathFormat string) {
-	resolved := a.resolveRouteID(r.PathValue("itemId"))
+	virtualItemID := r.PathValue("itemId")
+	resolved := a.resolveRouteID(virtualItemID)
 	if resolved == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
 		return
@@ -323,10 +421,20 @@ func (a *App) handleResolvedJSONMutation(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Invalid JSON body"})
 		return
 	}
-	status, payload, err := a.forwardJSONOrNoContent(r, resolved.Client, method, fmt.Sprintf(pathFormat, resolved.Client.UserID, resolved.OriginalID), nil, body)
+	status, payload, err := a.forwardJSONOrNoContent(r, resolved.Client, http.MethodPost, fmt.Sprintf("/Users/%s/Items/%s/UserData", resolved.Client.UserID, resolved.OriginalID), nil, body)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
 		return
+	}
+	// Dual-write: record played status to WatchStore for non-admin users
+	if a.WatchStore != nil {
+		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
+			if bodyMap, ok := body.(map[string]any); ok {
+				if played, ok := bodyMap["Played"].(bool); ok {
+					_ = a.WatchStore.MarkPlayed(reqCtx.ProxyUser.UserID, virtualItemID, played)
+				}
+			}
+		}
 	}
 	if payload == nil {
 		if status == 0 {
@@ -335,7 +443,157 @@ func (a *App) handleResolvedJSONMutation(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(status)
 		return
 	}
+	// Overlay local UserData for non-admin users
+	a.overlayLocalUserData(r, virtualItemID, payload)
 	cfg := a.ConfigStore.Snapshot()
 	rewriteResponseIDs(payload, resolved.ServerIndex, a.IDStore, cfg.Server.ID, a.Auth.ProxyUserID())
 	writeJSON(w, status, payload)
+}
+
+func (a *App) handleFavoriteItemAdd(w http.ResponseWriter, r *http.Request) {
+	virtualItemID := r.PathValue("itemId")
+	resolved := a.resolveRouteID(virtualItemID)
+	if resolved == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
+		return
+	}
+	body, err := decodeOptionalJSON(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Invalid JSON body"})
+		return
+	}
+	status, payload, err := a.forwardJSONOrNoContent(r, resolved.Client, http.MethodPost, fmt.Sprintf("/Users/%s/FavoriteItems/%s", resolved.Client.UserID, resolved.OriginalID), nil, body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+		return
+	}
+	// Dual-write favorite
+	if a.WatchStore != nil {
+		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
+			_ = a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, true)
+		}
+	}
+	if payload == nil {
+		if status == 0 {
+			status = http.StatusNoContent
+		}
+		w.WriteHeader(status)
+		return
+	}
+	a.overlayLocalUserData(r, virtualItemID, payload)
+	cfg := a.ConfigStore.Snapshot()
+	rewriteResponseIDs(payload, resolved.ServerIndex, a.IDStore, cfg.Server.ID, a.Auth.ProxyUserID())
+	writeJSON(w, status, payload)
+}
+
+func (a *App) handleFavoriteItemRemove(w http.ResponseWriter, r *http.Request) {
+	virtualItemID := r.PathValue("itemId")
+	resolved := a.resolveRouteID(virtualItemID)
+	if resolved == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
+		return
+	}
+	body, err := decodeOptionalJSON(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Invalid JSON body"})
+		return
+	}
+	status, payload, err := a.forwardJSONOrNoContent(r, resolved.Client, http.MethodDelete, fmt.Sprintf("/Users/%s/FavoriteItems/%s", resolved.Client.UserID, resolved.OriginalID), nil, body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+		return
+	}
+	// Dual-write favorite removal
+	if a.WatchStore != nil {
+		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
+			_ = a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, false)
+		}
+	}
+	if payload == nil {
+		if status == 0 {
+			status = http.StatusNoContent
+		}
+		w.WriteHeader(status)
+		return
+	}
+	a.overlayLocalUserData(r, virtualItemID, payload)
+	cfg := a.ConfigStore.Snapshot()
+	rewriteResponseIDs(payload, resolved.ServerIndex, a.IDStore, cfg.Server.ID, a.Auth.ProxyUserID())
+	writeJSON(w, status, payload)
+}
+
+// overlayLocalUserData patches the UserData fields in a response payload
+// to reflect the local per-user state (for non-admin users only).
+// overlayLocalUserDataItems overlays local UserData on each item in a list.
+// Items must have an "Id" field with the virtual item ID.
+func (a *App) overlayLocalUserDataItems(r *http.Request, items []map[string]any) {
+	if a.WatchStore == nil {
+		return
+	}
+	reqCtx := requestContextFrom(r.Context())
+	if reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.Role == "admin" {
+		return
+	}
+	for _, item := range items {
+		if id, _ := item["Id"].(string); id != "" {
+			a.overlayLocalUserData(r, id, item)
+		}
+	}
+}
+
+func (a *App) overlayLocalUserData(r *http.Request, virtualItemID string, payload any) {
+	if a.WatchStore == nil {
+		return
+	}
+	reqCtx := requestContextFrom(r.Context())
+	if reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.Role == "admin" {
+		return
+	}
+	progress := a.WatchStore.GetProgress(reqCtx.ProxyUser.UserID, virtualItemID)
+	if progress == nil {
+		// No local record → clear upstream admin's UserData to avoid leaking
+		clearUpstreamUserData(payload)
+		return
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return
+	}
+	// Overlay top-level fields if this IS a UserData object
+	if _, hasPlayPos := m["PlaybackPositionTicks"]; hasPlayPos {
+		m["PlaybackPositionTicks"] = progress.PositionTicks
+		m["Played"] = progress.Played
+		m["IsFavorite"] = progress.IsFavorite
+	}
+	// Overlay nested UserData if present
+	if ud, ok := m["UserData"].(map[string]any); ok {
+		ud["PlaybackPositionTicks"] = progress.PositionTicks
+		ud["Played"] = progress.Played
+		ud["IsFavorite"] = progress.IsFavorite
+	}
+}
+
+// clearUpstreamUserData resets UserData fields to a clean state, preventing
+// the upstream admin's watch history from leaking to non-admin users.
+func clearUpstreamUserData(payload any) {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return
+	}
+	// Top-level UserData fields (when payload IS a UserData object)
+	if _, hasPlayPos := m["PlaybackPositionTicks"]; hasPlayPos {
+		m["PlaybackPositionTicks"] = 0
+		m["Played"] = false
+		m["IsFavorite"] = false
+		m["PlayedPercentage"] = 0
+		delete(m, "LastPlayedDate")
+	}
+	// Nested UserData (when payload is an item with UserData sub-object)
+	if ud, ok := m["UserData"].(map[string]any); ok {
+		ud["PlaybackPositionTicks"] = 0
+		ud["Played"] = false
+		ud["IsFavorite"] = false
+		ud["PlayedPercentage"] = 0
+		delete(ud, "LastPlayedDate")
+	}
 }

@@ -115,6 +115,121 @@ func TestSessionRoutesTranslateIDsAndBroadcastCapabilities(t *testing.T) {
 	})
 }
 
+// TestCrossServerSessionRoutesToItemIdServer verifies that when ItemId
+// belongs to server A and MediaSourceId belongs to server B, session events
+// are forwarded to server A (ItemId's server) with each ID independently
+// resolved to its own server's original value.
+func TestCrossServerSessionRoutesToItemIdServer(t *testing.T) {
+	var playingBodyA atomic.Value
+	var progressBodyA atomic.Value
+	var stoppedBodyA atomic.Value
+	var hitB atomic.Int32
+
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "tok-a", "User": map[string]any{"Id": "user-a"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/Sessions/Playing":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			playingBodyA.Store(body)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/Sessions/Playing/Progress":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			progressBodyA.Store(body)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/Sessions/Playing/Stopped":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			stoppedBodyA.Store(body)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/Sessions/Capabilities":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/Sessions/Capabilities/Full":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer serverA.Close()
+
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "tok-b", "User": map[string]any{"Id": "user-b"}})
+		case r.Method == http.MethodPost && (r.URL.Path == "/Sessions/Playing" || r.URL.Path == "/Sessions/Playing/Progress" || r.URL.Path == "/Sessions/Playing/Stopped"):
+			hitB.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/Sessions/Capabilities":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/Sessions/Capabilities/Full":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer serverB.Close()
+
+	config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test\"\n  id: \"srv\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n  - name: \"B\"\n    url: %q\n    username: \"u2\"\n    password: \"p2\"\n", serverA.URL, serverB.URL)
+
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		token := loginToken(t, handler, "secret")
+
+		// ItemId belongs to server A (index 0), MediaSourceId to server B (index 1)
+		virtualItem := app.IDStore.GetOrCreateVirtualID("item-on-a", 0)
+		virtualMS := app.IDStore.GetOrCreateVirtualID("ms-on-b", 1)
+		virtualPlay := app.IDStore.GetOrCreateVirtualID("play-on-b", 1)
+
+		body := map[string]any{
+			"ItemId":        virtualItem,
+			"MediaSourceId": virtualMS,
+			"PlaySessionId": virtualPlay,
+			"PositionTicks": 54321,
+		}
+
+		for _, route := range []string{"/Sessions/Playing", "/Sessions/Playing/Progress", "/Sessions/Playing/Stopped"} {
+			rr := doJSONRequest(t, handler, http.MethodPost, route, body, token)
+			if rr.Code != http.StatusNoContent {
+				t.Fatalf("%s status = %d, body=%s", route, rr.Code, rr.Body.String())
+			}
+		}
+
+		// All three events must reach server A (ItemId's server)
+		for _, tc := range []struct {
+			name string
+			val  atomic.Value
+		}{
+			{"playing", playingBodyA},
+			{"progress", progressBodyA},
+			{"stopped", stoppedBodyA},
+		} {
+			raw := tc.val.Load()
+			payload, ok := raw.(map[string]any)
+			if !ok {
+				t.Fatalf("%s payload not received on server A: %#v", tc.name, raw)
+			}
+			// ItemId independently resolved to server A's original
+			if payload["ItemId"] != "item-on-a" {
+				t.Fatalf("%s ItemId = %v, want item-on-a", tc.name, payload["ItemId"])
+			}
+			// MediaSourceId independently resolved to server B's original
+			if payload["MediaSourceId"] != "ms-on-b" {
+				t.Fatalf("%s MediaSourceId = %v, want ms-on-b", tc.name, payload["MediaSourceId"])
+			}
+			// PlaySessionId independently resolved to server B's original
+			if payload["PlaySessionId"] != "play-on-b" {
+				t.Fatalf("%s PlaySessionId = %v, want play-on-b", tc.name, payload["PlaySessionId"])
+			}
+		}
+
+		// Server B must NOT receive any session events
+		if hitB.Load() != 0 {
+			t.Fatalf("server B received %d session events, want 0", hitB.Load())
+		}
+	})
+}
+
 func TestUserStateRoutesResolveIDsAndRewriteJSONResponses(t *testing.T) {
 	var playingStartMediaSource atomic.Value
 	var playingStopMediaSource atomic.Value

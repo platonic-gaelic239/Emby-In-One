@@ -110,6 +110,11 @@ func NewIDStore(dataDir string, logger *Logger) (*IDStore, error) {
 	return store, nil
 }
 
+// DB returns the underlying database handle for shared access.
+func (s *IDStore) DB() *sqliteDB {
+	return s.db
+}
+
 func (s *IDStore) additionalCount() int {
 	count := 0
 	for _, entry := range s.virtualToOriginal {
@@ -311,6 +316,11 @@ func (s *IDStore) evictExpiredStreamURLs() {
 			delete(s.streamURLs, k)
 		}
 	}
+	for k, entry := range s.activeStreamServer {
+		if now.Sub(entry.CreatedAt) > streamURLTTL {
+			delete(s.activeStreamServer, k)
+		}
+	}
 }
 
 func (s *IDStore) RemoveByServerIndex(serverIndex int) int {
@@ -332,9 +342,14 @@ func (s *IDStore) RemoveByServerIndex(serverIndex int) int {
 		if s.db != nil {
 			stmt, err := s.db.prepare(`DELETE FROM id_additional_instances WHERE virtual_id = ?`)
 			if err == nil {
-				_ = stmt.bindAll(virtualID)
-				_, _ = stmt.step()
+				if bindErr := stmt.bindAll(virtualID); bindErr != nil && s.logger != nil {
+					s.logger.Warnf("idstore: bind delete virtual_id=%s: %v", virtualID, bindErr)
+				} else if _, stepErr := stmt.step(); stepErr != nil && s.logger != nil {
+					s.logger.Warnf("idstore: delete virtual_id=%s: %v", virtualID, stepErr)
+				}
 				stmt.finalize()
+			} else if s.logger != nil {
+				s.logger.Warnf("idstore: prepare delete: %v", err)
 			}
 		}
 	}
@@ -349,14 +364,24 @@ func (s *IDStore) RemoveByServerIndex(serverIndex int) int {
 	}
 	if s.db != nil {
 		if stmt, err := s.db.prepare(`DELETE FROM id_mappings WHERE server_index = ?`); err == nil {
-			_ = stmt.bindAll(serverIndex)
-			_, _ = stmt.step()
+			if bindErr := stmt.bindAll(serverIndex); bindErr != nil && s.logger != nil {
+				s.logger.Warnf("idstore: bind delete mappings server_index=%d: %v", serverIndex, bindErr)
+			} else if _, stepErr := stmt.step(); stepErr != nil && s.logger != nil {
+				s.logger.Warnf("idstore: delete mappings server_index=%d: %v", serverIndex, stepErr)
+			}
 			stmt.finalize()
+		} else if s.logger != nil {
+			s.logger.Warnf("idstore: prepare delete mappings: %v", err)
 		}
 		if stmt, err := s.db.prepare(`DELETE FROM id_additional_instances WHERE server_index = ?`); err == nil {
-			_ = stmt.bindAll(serverIndex)
-			_, _ = stmt.step()
+			if bindErr := stmt.bindAll(serverIndex); bindErr != nil && s.logger != nil {
+				s.logger.Warnf("idstore: bind delete additional server_index=%d: %v", serverIndex, bindErr)
+			} else if _, stepErr := stmt.step(); stepErr != nil && s.logger != nil {
+				s.logger.Warnf("idstore: delete additional server_index=%d: %v", serverIndex, stepErr)
+			}
 			stmt.finalize()
+		} else if s.logger != nil {
+			s.logger.Warnf("idstore: prepare delete additional: %v", err)
 		}
 	}
 	return removed
@@ -451,14 +476,24 @@ func (s *IDStore) ShiftServerIndices(deletedIndex int) {
 	}
 	if s.db != nil {
 		if stmt, err := s.db.prepare(`UPDATE id_mappings SET server_index = server_index - 1 WHERE server_index > ?`); err == nil {
-			_ = stmt.bindAll(deletedIndex)
-			_, _ = stmt.step()
+			if bindErr := stmt.bindAll(deletedIndex); bindErr != nil && s.logger != nil {
+				s.logger.Warnf("idstore: bind shift mappings: %v", bindErr)
+			} else if _, stepErr := stmt.step(); stepErr != nil && s.logger != nil {
+				s.logger.Warnf("idstore: shift mappings: %v", stepErr)
+			}
 			stmt.finalize()
+		} else if s.logger != nil {
+			s.logger.Warnf("idstore: prepare shift mappings: %v", err)
 		}
 		if stmt, err := s.db.prepare(`UPDATE id_additional_instances SET server_index = server_index - 1 WHERE server_index > ?`); err == nil {
-			_ = stmt.bindAll(deletedIndex)
-			_, _ = stmt.step()
+			if bindErr := stmt.bindAll(deletedIndex); bindErr != nil && s.logger != nil {
+				s.logger.Warnf("idstore: bind shift additional: %v", bindErr)
+			} else if _, stepErr := stmt.step(); stepErr != nil && s.logger != nil {
+				s.logger.Warnf("idstore: shift additional: %v", stepErr)
+			}
 			stmt.finalize()
+		} else if s.logger != nil {
+			s.logger.Warnf("idstore: prepare shift additional: %v", err)
 		}
 	}
 }

@@ -31,7 +31,7 @@ func VerifyPassword(plain, stored string) bool {
 		return false
 	}
 	if !IsHashedPassword(stored) {
-		return subtle.ConstantTimeCompare([]byte(plain), []byte(stored)) == 1
+		return false
 	}
 	parts := strings.SplitN(stored, ":", 2)
 	salt, err := hex.DecodeString(parts[0])

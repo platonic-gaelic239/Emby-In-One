@@ -1,10 +1,10 @@
 ﻿# Emby-In-One
 
-> **Version: V1.3.1**
+> **Version: V1.4.0**
 
 [更新日志](Update.md) | [English README](README_EN.md) | [安全策略](SECURITY.md) | [更新计划](Update%20Plan.md) | [V1.2.1 旧版文档](README_V1.2.1.md) | [GitHub](https://github.com/ArizeSky/Emby-In-One)
 
-多台 Emby 服务器聚合代理，将多个上游 Emby 服务器的媒体库合并为一个统一入口，支持任何标准 Emby 客户端访问。（本版本为 V1.3 Go 后端重构 Pre-release 版，具备更高性能与并发能力）
+基于Go语言实现的多台 Emby 服务器聚合代理，将多个上游 Emby 服务器的媒体库合并为一个统一入口，支持任何标准 Emby 客户端访问。支持多用户管理、独立观看历史、UA伪装、并发播放数限制和角色权限隔离。
 
 ## 测试站点
 
@@ -26,14 +26,18 @@ Emby连接地址：https://emby.cothx.eu.cc/
 
 ## 功能概览
 
-- **多服务器聚合** — 将多台服务器的影视库、搜索结果合并展示。采用 Goroutine 并发请求，聚合延迟仅取决于最慢的一台服务器。
+- **多用户管理** — 支持创建普通用户，每个用户可独立配置可访问的上游服务器集合；管理面板、REST API 和 SSH 面板均支持用户增删改查。
+- **独立观看历史** — 普通用户拥有独立的观看进度、已播放状态、收藏和"继续观看 / 接下来观看"，与其他用户和上游服务器的共享账户完全隔离；管理员保持上游原始行为。
+- **并发播放数限制** — 每台上游服务器可配置最大并发播放数（`maxConcurrent`），超出限制的播放请求返回 429；基于心跳超时自动释放。
+- **角色权限隔离** — 管理员拥有全部服务器和管理面板访问权；普通用户仅可访问被分配的服务器，不可进入管理 API。
+- **多服务器聚合** — 将多台服务器的影视库、搜索结果合并展示。采用 Goroutine 并发请求 + 可配置宽恕期，快速服务器优先返回，慢速服务器在宽恕期内继续汇入；后台静默补全超时数据，实际延迟取决于最快服务器加宽恕期而非最慢服务器。单台上游离线时，已聚合的内容通过 OtherInstances 自动回退到其他在线服务器，继续观看和接下来观看不受影响。
 - **智能去重与优选** — 相同影片自动合并，保留多版本源可选；支持 4 级元数据优先级（指定标记 > 中文 > 长度 > 顺序）智能摘取最佳展示信息。
-- **客户端透传 (Passthrough)** — 按 Token 隔离透传客户端身份至上游（防串号），独创 5 级验证链持久化保存客户端特征，支持断线重连。
-- **高阶 UA 伪装** — 支持 Infuse 伪装，亦可通过 `custom` 模式为每台上游独立自定义全部 5 个 Emby 客户端标识字段。
+- **高阶 UA 伪装** — 支持 Infuse 伪装、客户端透传UA特征，亦可通过 `custom` 模式为每台上游独立自定义全部 5 个 Emby 客户端标识字段，绕过Emby普遍的UA限制。
 - **网络代理池** — 各个上游服务器可独立配置专属 HTTP/HTTPS 代理，内置一键连通性测试。
 - **双播放模式** — 代理模式（流量中转，隐藏上游，支持 HLS/分段）或 直连模式（302 跳转上游，不耗费代理机流量）。
-- **完全管控与运维** — 内置现代化 SSH 命令行管理菜单及 Web 管理面板；自带持久化日志与 SQLite ID 映射。
-- **安全加固** — 登录防暴力破解（锁定IP）、配置文件 0600 安全权限原子写入、请求体超限防护、防并发冲突与优雅关机。
+- **Passthrough 延迟登录** — passthrough 模式的上游不再在启动时使用 Infuse 身份登录，等待真实客户端连接后再认证，避免产生虚假设备记录。
+- **Token 管理与会话稳定** — 代理 Token 永不过期（仅在登出/密码修改/手动吊销时撤销），避免长时间待机客户端被迫 401；上游 Token 过期时自动异步重登录（30 秒防抖），无需手动重连；管理员修改密码后自动吊销全部已签发 Token。
+- **完全管控与运维** — 内置现代化 SSH 命令行管理菜单及 Web 管理面板；自带持久化日志与 SQLite ID 映射。SSH 菜单自动检测 Binary/Docker 部署模式，分发到 systemd 或 Docker Compose 管理命令。
 
 ---
 
@@ -41,7 +45,7 @@ Emby连接地址：https://emby.cothx.eu.cc/
 
 > **旧版 Node.js 部署说明**：如果您希望部署基于 Node.js 的 V1.2.1 稳定版，请前往本仓库的 [Releases 页面](https://github.com/ArizeSky/Emby-In-One/releases) 下载 V1.2.1 的 Source code 源码压缩包，解压后同样运行 `bash install.sh` 即可。
 
-本项目优先推荐在 Linux 服务器直接使用 Release 二进制部署 V1.3（无需本地编译）；Docker 方式适合希望自行构建镜像的场景。
+本项目优先推荐在 Linux 服务器直接使用 Release 二进制部署 V1.4.0（无需本地编译）；Docker 方式适合希望自行构建镜像的场景。
 
 ### 方式一：Release 二进制一键安装（首推）
 
@@ -86,6 +90,7 @@ cd /opt/emby-in-one
 server:
   port: 8096
   name: "Emby-In-One"
+  # trustProxy: true        # 部署在反向代理（Nginx/Caddy 等）后面时设为 true
 
 admin:
   username: "admin"
@@ -112,7 +117,7 @@ docker compose up -d
 
 ### 方式四：Go 源码直接运行（适合开发者）
 
-环境要求：Go 1.26+ 且具备 C 编译链（Debian/Ubuntu 运行 `apt install build-essential`）。
+环境要求：Go 1.23+ 且具备 C 编译链（Debian/Ubuntu 运行 `apt install build-essential`）。
 ```bash
 mkdir -p config data
 # 按方式三的说明在 config 文件夹下创建 config.yaml
@@ -138,7 +143,7 @@ go run ./cmd/emby-in-one
 - Windows / macOS 也可运行（开发测试用）
 
 **Go 源码编译：**
-- Go 1.26+
+- Go 1.23+
 - C 编译链（CGO 用于 SQLite）：Debian/Ubuntu 运行 `apt install build-essential`
 
 ---
@@ -152,6 +157,7 @@ server:
   port: 8096
   name: "Emby-In-One"
   # id: 首次启动自动生成，请勿手动修改
+  # trustProxy: true        # 部署在反向代理后面时设为 true（见下方说明）
 
 admin:
   username: "admin"
@@ -166,6 +172,9 @@ timeouts:
   login: 10000           # 上游登录超时（ms）
   healthCheck: 10000     # 健康检查超时（ms）
   healthInterval: 60000  # 健康检查间隔（ms）
+  searchGracePeriod: 3000     # 搜索聚合宽恕期——收到首个结果后继续等待其他服务器的时长（ms）
+  metadataGracePeriod: 3000   # 元数据获取宽恕期（ms）
+  latestGracePeriod: 0        # "最新添加"宽恕期——0 表示等待全部服务器（ms）
 
 proxies: []
   # - id: "abc123"
@@ -187,6 +196,7 @@ upstream:
     followRedirects: true                      # 跟随上游 302 重定向（默认 true）
     proxyId: null                              # 关联代理池中的代理 ID
     priorityMetadata: false                    # 合并时优先使用此服务器的元数据
+    maxConcurrent: 3                           # 最大并发播放数，0表示不限制（仅影响普通用户）
 
   - name: "服务器C（custom 伪装示例）"
     url: "https://emby-c.example.com"
@@ -200,6 +210,70 @@ upstream:
 ```
 
 在管理面板修改的设置会热生效，无需重启服务。
+
+### 反向代理信任 (`trustProxy`)
+
+| 配置值 | 行为 | 适用场景 |
+|--------|------|----------|
+| `false`（默认） | 登录限速使用 TCP 直连 IP（`RemoteAddr`） | 直接暴露在公网，无反向代理 |
+| `true` | 登录限速信任 `X-Real-IP` / `X-Forwarded-For` 头 | 部署在 Nginx / Caddy 等反向代理之后 |
+
+> **重要**：如果您的 Emby-In-One 部署在反向代理后面（Nginx、Caddy、Cloudflare 等），**必须**在 `config.yaml` 的 `server` 段添加 `trustProxy: true`，否则所有客户端请求将被视为来自同一 IP，5 次登录失败后所有用户均会被限速 15 分钟。
+
+---
+
+## 多用户管理
+
+V1.4 新增多用户支持，允许管理员创建多个普通用户，每个用户可独立配置可访问的上游服务器。
+
+### 角色说明
+
+| 角色 | 权限 |
+|------|------|
+| 管理员 (admin) | 可访问所有服务器、管理面板、管理 API；观看历史与上游服务器共享 |
+| 普通用户 (user) | 仅可访问被分配的服务器；拥有独立的观看历史（与其他用户、上游账户隔离） |
+
+### 独立观看历史
+
+由于所有分发用户共享同一个上游 Emby 账户，上游的观看进度、已播放状态和收藏是共享的。V1.4 起，普通用户的观看数据完全隔离在本地 SQLite 数据库中：
+
+| 功能 | 管理员 | 普通用户 |
+|------|--------|----------|
+| 继续观看 (Resume) | 上游服务器数据 | 本地独立数据 |
+| 接下来观看 (NextUp) | 上游服务器数据 | 基于本地进度计算 |
+| 已播放状态 (Played) | 上游服务器数据 | 本地独立记录 |
+| 收藏 (Favorite) | 上游服务器数据 | 本地独立记录 |
+| 浏览页面中的 UserData | 直接透传上游 | 叠加本地状态覆盖 |
+
+**工作原理：**
+
+- 播放事件（开始、进度、停止）会同时写入上游服务器和本地数据库（双写）
+- 播放完成（进度 ≥ 90%）自动标记为"已看"
+- 标记已播放 / 收藏等用户操作同样双写
+- 删除用户时，其本地观看数据自动清除
+- 首次播放某项目时，系统自动从上游获取元数据（剧名、季数、集数）以支持 NextUp 计算
+
+### 创建普通用户
+
+管理员可通过以下方式创建和管理普通用户：
+
+1. **管理面板** — 在「用户管理」页面可视化操作
+2. **SSH 菜单** — 使用 `emby-in-one` 命令，选择「添加普通用户」或「删除普通用户」
+3. **REST API** — `POST /admin/api/users`（需管理员 Token）
+
+### 配置可访问服务器
+
+每个普通用户可被分配一组可访问的上游服务器（通过服务器索引列表）。用户登录后，只能看到和播放被分配服务器上的内容。未分配任何服务器的用户（`allowedServers` 为空列表）将无法访问任何内容。
+
+### 并发播放数限制
+
+每台上游服务器可独立配置 `maxConcurrent`（最大并发播放数）：
+
+- `0`（默认）：不限制
+- 正整数：限制该服务器上同时播放的普通用户数量
+- 管理员不受此限制
+- 超出限制时返回 `429 Too Many Requests`
+- 基于 3 分钟心跳超时自动释放占用
 
 ---
 
@@ -331,14 +405,50 @@ Passthrough 使用五级 header 解析，确保在任何状态下都能向上游
 | 页面 | 功能 |
 |------|------|
 | **系统概览** | 在线服务器数、ID 映射数、存储引擎（SQLite） |
-| **上游节点** | 添加/编辑/删除/重连服务器，拖拽排序 |
+| **上游节点** | 添加/编辑/删除/重连服务器，拖拽排序；支持配置最大并发数 `maxConcurrent` |
+| **用户管理** | 创建、编辑、启用/禁用、删除普通用户，可视化配置可访问服务器 |
 | **网络代理** | HTTP/HTTPS 代理池管理，支持一键连通性测试 |
-| **全局设置** | 系统名称、默认播放模式、管理员账户、超时配置 |
+| **全局设置** | 系统名称、默认播放模式、管理员账户、超时与宽恕期配置 |
 | **运行日志** | 实时日志查看，支持级别筛选（ERROR/WARN/INFO/DEBUG）、关键词搜索、下载原始日志文件、清空日志 |
 
 ### 管理 API
 
 所有 API 需要认证（`X-Emby-Token` 头或 `api_key` 查询参数）。出于安全考虑，`/admin/api/*` 仅按同源方式开放，不为任意跨域来源返回放行头。
+
+---
+
+## SSH 管理菜单
+
+安装脚本执行完成后，可直接使用：
+
+```bash
+emby-in-one
+```
+
+可执行：
+
+- 启动 / 重启 / 停止服务
+- 在线更新（最新版）/ 下载指定版本
+- 查看服务状态、公网 IP
+- 查看管理员凭据、修改管理员用户名 / 密码
+- 查看用户列表、添加普通用户、删除普通用户
+- 查看日志、查看版本号（`--version`）
+- 卸载服务（支持保留配置和数据）
+
+> SSH 菜单自动检测当前部署方式（Binary / Docker），所有操作自动分发到 systemd 或 Docker Compose 对应命令。Docker 模式下更新采用源码重建流程。菜单标题栏显示当前版本号。
+
+---
+
+## 数据目录说明
+
+运行时目录：
+
+- `config/` — 保存配置文件 `config.yaml`
+- `data/` — 保存以下运行时数据：
+  - `mappings.db` — 虚拟 ID 与附加实例映射 + 用户数据（UserStore）+ 观看历史数据（WatchStore）
+  - `tokens.json` — 代理层 token 存储
+  - `captured-headers.json` — passthrough 客户端头持久化
+  - `emby-in-one.log` — 日志文件
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -383,10 +493,11 @@ Passthrough 使用五级 header 解析，确保在任何状态下都能向上游
 
 ### 首页加载慢 / 媒体库不全
 
-- 默认请求超时 15 秒，聚合超时 20 秒
-- 如果上游服务器网络延迟高，部分结果可能被跳过
+- 默认搜索宽恕期 3 秒——收到第一个服务器的结果后，最多再等 3 秒让其余服务器响应；超时服务器的数据会在后台静默补全
+- 如果上游服务器网络延迟普遍较高，可在管理面板「全局设置」或 `config.yaml` 的 `timeouts` 中调大 `searchGracePeriod`、`metadataGracePeriod`
+- `latestGracePeriod` 默认为 0（等待全部服务器），如首页"最新添加"加载慢可设为正数
 - 查看日志中 `timeout` 或 `abort` 关键词
-- 可在 `config.yaml` 的 `timeouts` 字段适当调大超时值
+- 也可适当调大 `api`（单次请求超时）和 `global`（聚合总超时）值
 
 ### 忘记管理员密码
 
@@ -401,6 +512,13 @@ Passthrough 使用五级 header 解析，确保在任何状态下都能向上游
 emby-in-one
 # 选择"修改密码"选项
 ```
+
+### 反向代理用户登录被限速 (429)
+
+如果所有用户在 5 次登录失败后都收到 `429 Too Many Requests`，说明 `trustProxy` 未开启：
+1. 在 `config.yaml` 的 `server` 段添加 `trustProxy: true`
+2. 重启服务
+3. 确认反向代理正确设置了 `X-Real-IP` 或 `X-Forwarded-For` 头
 
 ### Docker 容器无法访问上游服务器
 
@@ -423,28 +541,45 @@ Emby-In-One/
 │   └── main.go                     # 程序入口
 ├── internal/backend/
 │   ├── config.go                   # YAML 配置加载/保存/校验/原子写入
-│   ├── server.go                   # HTTP 路由挂载、中间件、CORS 策略
+│   ├── server.go                   # HTTP 服务器启动与优雅关机
+│   ├── routes.go                   # 路由注册总表（URL → Handler 映射）
+│   ├── middleware.go               # HTTP 中间件（CORS、日志、状态码捕获）
 │   ├── auth.go                     # 代理 Token 签发与校验
+│   ├── auth_context.go             # 请求级认证上下文注入与提取
 │   ├── auth_manager.go             # 上游认证管理（登录/Session/API Key）
 │   ├── identity.go                 # 客户端身份捕获与 Passthrough 五级解析
 │   ├── identity_persistence.go     # 客户端身份按服务器维度持久化
+│   ├── user_store.go               # 多用户存储（CRUD、密码哈希、内存索引 + SQLite）
+│   ├── handlers_admin.go           # 管理后台 API 处理器（上游服务器增删改查）
+│   ├── handlers_system.go          # 系统信息接口（/System/Info）
+│   ├── handlers_user.go            # 用户登录限速与用户相关接口处理器
+│   ├── admin_validation.go         # 管理后台输入校验与辅助工具
 │   ├── idstore.go                  # SQLite 双向 ID 映射（虚拟 ID ↔ 原始 ID）
 │   ├── id_rewriter.go              # 递归 ID 虚拟化/反虚拟化重写
 │   ├── query_ids.go                # 批量查询 ID 解析
 │   ├── media.go                    # 媒体聚合、去重、元数据优先级选择
+│   ├── aggregation.go              # 通用聚合框架（宽恕期 + 后台补全）
+│   ├── media_items.go              # 媒体条目查询（多上游扇出合并）
+│   ├── media_resume.go             # "继续观看"接口代理与多上游合并
+│   ├── media_nextup.go             # "接下来观看"接口代理与多上游合并
+│   ├── media_playback.go           # PlaybackInfo 查询与并发播放限制检查
+│   ├── media_stream.go             # 视频/音频流代理（虚拟 ID 路由解析）
 │   ├── library_image.go            # 图片代理（缓存头）
 │   ├── series_userdata.go          # 系列级观看历史隔离（Resume/NextUp）
 │   ├── session_userdata.go         # Sessions/Playing 进度上报
+│   ├── watch_store.go              # 每用户观看进度存储与持久化
+│   ├── playback_limiter.go         # 并发播放数限制（心跳超时自动释放）
 │   ├── streamproxy.go              # HTTP 流代理（背压、HLS 相对路径重写）
 │   ├── fallback_proxy.go           # 兜底路由：扫描 URL/Query 中的虚拟 ID
 │   ├── healthcheck.go              # 并行健康检查
 │   ├── logger.go                   # 分级日志（Console + File 双输出 + 轮转）
 │   ├── scrypt_local.go             # 管理员密码 scrypt 加密
+│   ├── sqlite_cgo.go               # CGO 嵌入式 SQLite 编译与底层绑定
 │   └── upstream_stub.go            # 上游连接池 & 并发请求编排
 ├── third_party/sqlite/             # SQLite CGO 源码依赖
 ├── public/
-│   └── admin.html                  # Vue 3 + Tailwind CSS 管理面板 SPA
-├── build/                          # 多架构预编译二进制
+│   ├── admin.html                  # Vue 3 + Tailwind CSS 管理面板模板
+│   └── admin.js                    # Vue 3 应用逻辑（从 admin.html 拆分）
 ├── Dockerfile                      # Go 环境容器构建
 ├── docker-compose.yml
 ├── install.sh                      # 源码仓库一键部署脚本（Docker）

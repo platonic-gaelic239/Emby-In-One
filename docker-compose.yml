@@ -1,6 +1,9 @@
 services:
   emby-in-one:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: v1.4.0
     container_name: emby-in-one
     ports:
       - "8096:8096"

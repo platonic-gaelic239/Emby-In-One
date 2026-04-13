@@ -14,7 +14,8 @@ import (
 var fallbackVirtualIDPattern = regexp.MustCompile(`(?i)[a-f0-9]{32}`)
 
 func (a *App) handleFallbackProxy(w http.ResponseWriter, r *http.Request) {
-	targetClient, rewrittenPath, serverIndex, query, ambiguous := a.resolveFallbackTarget(r)
+	reqCtx := requestContextFrom(r.Context())
+	targetClient, rewrittenPath, serverIndex, query, ambiguous := a.resolveFallbackTarget(r, reqCtx)
 	if targetClient == nil {
 		if ambiguous {
 			if a.Logger != nil {
@@ -98,7 +99,7 @@ func (a *App) handleFallbackProxy(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(bodyBytes)
 }
 
-func (a *App) resolveFallbackTarget(r *http.Request) (*UpstreamClient, string, int, url.Values, bool) {
+func (a *App) resolveFallbackTarget(r *http.Request, reqCtx *RequestContext) (*UpstreamClient, string, int, url.Values, bool) {
 	query := cloneValues(r.URL.Query())
 	rewrittenPath := r.URL.Path
 	serverIndex := -1
@@ -106,10 +107,27 @@ func (a *App) resolveFallbackTarget(r *http.Request) (*UpstreamClient, string, i
 
 	for _, candidate := range fallbackVirtualIDPattern.FindAllString(r.URL.Path, -1) {
 		if resolved := a.IDStore.ResolveVirtualID(candidate); resolved != nil {
-			if client := a.Upstream.GetClient(resolved.ServerIndex); client != nil && client.IsOnline() {
-				targetClient = client
-				serverIndex = resolved.ServerIndex
-				rewrittenPath = strings.ReplaceAll(rewrittenPath, candidate, resolved.OriginalID)
+			// Try primary
+			if a.isServerAllowed(reqCtx, resolved.ServerIndex) {
+				if client := a.Upstream.GetClient(resolved.ServerIndex); client != nil && client.IsOnline() {
+					targetClient = client
+					serverIndex = resolved.ServerIndex
+					rewrittenPath = strings.ReplaceAll(rewrittenPath, candidate, resolved.OriginalID)
+					break
+				}
+			}
+			// Primary offline — try OtherInstances
+			for _, other := range resolved.OtherInstances {
+				if a.isServerAllowed(reqCtx, other.ServerIndex) {
+					if client := a.Upstream.GetClient(other.ServerIndex); client != nil && client.IsOnline() {
+						targetClient = client
+						serverIndex = other.ServerIndex
+						rewrittenPath = strings.ReplaceAll(rewrittenPath, candidate, other.OriginalID)
+						break
+					}
+				}
+			}
+			if targetClient != nil {
 				break
 			}
 		}
@@ -118,9 +136,11 @@ func (a *App) resolveFallbackTarget(r *http.Request) (*UpstreamClient, string, i
 	if rewritten, idx, found := rewriteIDQueryValues(query, a.IDStore); found {
 		query = url.Values(rewritten)
 		if targetClient == nil {
-			if client := a.Upstream.GetClient(idx); client != nil && client.IsOnline() {
-				targetClient = client
-				serverIndex = idx
+			if a.isServerAllowed(reqCtx, idx) {
+				if client := a.Upstream.GetClient(idx); client != nil && client.IsOnline() {
+					targetClient = client
+					serverIndex = idx
+				}
 			}
 		}
 	} else {
@@ -128,7 +148,7 @@ func (a *App) resolveFallbackTarget(r *http.Request) (*UpstreamClient, string, i
 	}
 
 	if targetClient == nil {
-		online := a.Upstream.OnlineClients()
+		online := a.allowedClients(reqCtx)
 		if len(online) == 0 {
 			return nil, rewrittenPath, serverIndex, query, false
 		}
@@ -224,4 +244,3 @@ func minInt(a, b int) int {
 	}
 	return b
 }
-

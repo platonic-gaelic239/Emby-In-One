@@ -14,3 +14,19 @@ func TestHashAndVerifyPassword(t *testing.T) {
 		t.Fatalf("VerifyPassword returned true for wrong password")
 	}
 }
+
+func TestVerifyPasswordRejectsPlaintext(t *testing.T) {
+	// Plaintext stored password must always be rejected, even if it matches input
+	if VerifyPassword("secret", "secret") {
+		t.Fatal("VerifyPassword should reject plaintext stored password")
+	}
+	if VerifyPassword("", "") {
+		t.Fatal("VerifyPassword should reject empty inputs")
+	}
+	if VerifyPassword("x", "") {
+		t.Fatal("VerifyPassword should reject empty stored")
+	}
+	if VerifyPassword("", "x") {
+		t.Fatal("VerifyPassword should reject empty plain")
+	}
+}

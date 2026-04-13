@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -94,5 +95,46 @@ func TestConfigSaveUsesAtomicReplace(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `name: "Atomic Name"`) {
 		t.Fatalf("updated config missing server name: %s", string(raw))
+	}
+}
+
+func TestIsPrivateOrReservedIP(t *testing.T) {
+	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.169.254", "0.0.0.0", "::1"} {
+		if !isPrivateOrReservedIP(ip) {
+			t.Errorf("expected %s to be private/reserved", ip)
+		}
+	}
+}
+
+func TestProxyTestSSRFBlocksPrivateIP(t *testing.T) {
+	withTempAppPrepared(t, parityConfigWithUpstreams(""), nil, func(app *App, handler http.Handler, dir string) {
+		token := loginToken(t, handler, "secret")
+		rr := doJSONRequest(t, handler, "POST", "/admin/api/proxies/test", map[string]any{
+			"proxyUrl":  "http://1.2.3.4:8080",
+			"targetUrl": "http://169.254.169.254/latest/meta-data/",
+		}, token)
+		if rr.Code != 400 {
+			t.Fatalf("expected 400 for private target, got %d: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "private or reserved") {
+			t.Fatalf("expected private/reserved error, got: %s", rr.Body.String())
+		}
+	})
+}
+
+func TestLoginRateLimiterMaxCapacity(t *testing.T) {
+	limiter := &loginRateLimiter{}
+	for i := 0; i < loginMaxTrackedIPs; i++ {
+		if !limiter.checkAndRecord("ip-" + strconv.Itoa(i)) {
+			t.Fatalf("expected checkAndRecord to succeed for ip-%d", i)
+		}
+	}
+	// Next unique IP should be rejected
+	if limiter.checkAndRecord("ip-overflow") {
+		t.Fatal("expected checkAndRecord to reject new IP when at capacity")
+	}
+	// Existing IP should still work
+	if !limiter.checkAndRecord("ip-0") {
+		t.Fatal("expected checkAndRecord to allow existing IP")
 	}
 }

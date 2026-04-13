@@ -1,7 +1,7 @@
 package backend
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../third_party/sqlite -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1
+#cgo CFLAGS: -I${SRCDIR}/../../third_party/sqlite -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION
 #cgo linux CFLAGS: -D_GNU_SOURCE
 #include <stdlib.h>
 #include "../../third_party/sqlite/sqlite3.c"
@@ -69,6 +69,22 @@ func (db *sqliteDB) exec(query string) error {
 	return nil
 }
 
+// execParams runs a write query with parameterized arguments to prevent SQL injection.
+func (db *sqliteDB) execParams(query string, args ...any) error {
+	stmt, err := db.prepare(query)
+	if err != nil {
+		return err
+	}
+	defer stmt.finalize()
+	if err := stmt.bindAll(args...); err != nil {
+		return err
+	}
+	if _, err := stmt.step(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (db *sqliteDB) prepare(query string) (*sqliteStmt, error) {
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
@@ -100,6 +116,10 @@ func (stmt *sqliteStmt) bindAll(args ...any) error {
 			if rc := C.sqlite3_bind_int(stmt.ptr, C.int(i+1), C.int(v)); rc != 0 {
 				return fmt.Errorf("sqlite bind int: %d", int(rc))
 			}
+		case int64:
+			if rc := C.sqlite3_bind_int64(stmt.ptr, C.int(i+1), C.sqlite3_int64(v)); rc != 0 {
+				return fmt.Errorf("sqlite bind int64: %d", int(rc))
+			}
 		default:
 			return fmt.Errorf("unsupported sqlite bind type %T", arg)
 		}
@@ -129,4 +149,8 @@ func (stmt *sqliteStmt) columnText(index int) string {
 
 func (stmt *sqliteStmt) columnInt(index int) int {
 	return int(C.sqlite3_column_int(stmt.ptr, C.int(index)))
+}
+
+func (stmt *sqliteStmt) columnInt64(index int) int64 {
+	return int64(C.sqlite3_column_int64(stmt.ptr, C.int(index)))
 }
